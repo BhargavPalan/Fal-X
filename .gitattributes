@@ -1,0 +1,11 @@
+# Normalize line endings so shebang scripts survive a Windows checkout.
+* text=auto eol=lf
+
+# Shell and Go sources are always LF.
+*.sh    text eol=lf
+*.go    text eol=lf
+Makefile text eol=lf
+
+# Treat wordlist and binary fixtures as-is.
+*.png   binary
+*.gz    binary

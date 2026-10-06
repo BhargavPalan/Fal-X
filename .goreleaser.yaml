@@ -1,0 +1,70 @@
+version: 2
+
+project_name: fal-x
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: fal-x
+    main: ./cmd/fal-x
+    binary: fal-x
+    env:
+      - CGO_ENABLED=0
+    # Without -trimpath the binary embeds the absolute source paths of the
+    # machine that built it, so every release leaks the builder's directory
+    # layout into something users download.
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X github.com/BhargavPalan/Fal-X/internal/config.Version={{ .Version }}
+    goos:
+      - linux
+      - darwin
+      - windows
+    # 64-bit only. The reconnaissance tools Fal-X drives are 64-bit, so a
+    # 32-bit binary would not be able to run them anyway.
+    goarch:
+      - amd64
+      - arm64
+
+archives:
+  - id: fal-x
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}{{ with .Arm }}v{{ . }}{{ end }}
+    files:
+      - README.md
+      - LICENSE
+      - config/scope.txt.example
+      - config/out-of-scope.txt.example
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    formats: [tar.gz]
+
+checksum:
+  name_template: checksums.txt
+
+sboms:
+  - artifacts: archive
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+
+release:
+  prerelease: auto
+  footer: |
+    ## Authorization
+
+    Fal-X performs active reconnaissance. Only use it against systems you own or
+    have explicit written permission to test. A run is constrained by an
+    allowlist (`--scope`) and a denylist (`config/out-of-scope.txt`); a target
+    wider than a /22, an autonomous system, or a bare wildcard asks for
+    confirmation before anything is contacted.

@@ -1,0 +1,59 @@
+version: "2"
+
+linters:
+  enable:
+    - bodyclose
+    - copyloopvar
+    - durationcheck
+    - errorlint
+    - gocritic
+    - gosec
+    - misspell
+    - nilerr
+    - noctx
+    - revive
+    - rowserrcheck
+    - sqlclosecheck
+    - unconvert
+    - wastedassign
+
+  settings:
+    gosec:
+      excludes:
+        # Reading files the operator names (scope lists, credentials, wordlists)
+        # is the job of a CLI, so a path from a flag is expected, not tainted.
+        - G304
+        - G703
+        # External tools are launched only through internal/tools, which passes
+        # arguments as a list and never involves a shell.
+        - G204
+        # Unchecked errors are errcheck's job; see the exclusion preset below.
+        - G104
+    revive:
+      rules:
+        - name: exported
+        - name: package-comments
+        - name: var-naming
+        - name: indent-error-flow
+        - name: error-strings
+        - name: error-naming
+        - name: errorf
+        - name: blank-imports
+        - name: context-as-argument
+        - name: unreachable-code
+        - name: redefines-builtin-id
+
+  exclusions:
+    # Keep v1's default of not flagging unchecked Close, Remove and print
+    # calls, which are almost always best-effort cleanup.
+    presets:
+      - std-error-handling
+    rules:
+      # Test fixtures are throwaway files in a per-test temp directory.
+      - path: _test\.go
+        linters: [gosec]
+        text: "G30[26]"
+
+formatters:
+  enable:
+    - gofmt

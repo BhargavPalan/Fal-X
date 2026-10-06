@@ -1,0 +1,31 @@
+# Local development database.
+#
+# This is for development only. A deployment uses whatever Postgres the
+# operator already runs, reached through FALX_DSN.
+#
+# The application role is deliberately not a superuser and has no BYPASSRLS. Row
+# level security does not apply to a table owner unless FORCE is set, and it
+# never applies to a role with BYPASSRLS, so a convenient role would quietly
+# disable the tenant isolation the whole design rests on.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: falx-postgres
+    environment:
+      POSTGRES_DB: falx
+      POSTGRES_USER: falx
+      POSTGRES_PASSWORD: falx
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - falx-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U falx -d falx"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+volumes:
+  falx-pgdata:

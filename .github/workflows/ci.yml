@@ -1,0 +1,121 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: verify (linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    # The migration lifecycle and the row-level security guarantees need a real
+    # Postgres, so the suite runs against a throwaway one with no credentials
+    # worth leaking.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: falx_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 15
+
+    env:
+      FALX_TEST_DSN: postgres://falx:falx@127.0.0.1:5432/falx_test?sslmode=disable
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Create the test role
+        env:
+          PGHOST: 127.0.0.1
+          PGUSER: postgres
+          PGPASSWORD: postgres
+        run: |
+          # Deliberately a non-superuser role with no BYPASSRLS, because that is
+          # how the application connects in production. If the tests passed only
+          # because the role could bypass row-level security, they would be
+          # testing something the deployed system never does.
+          psql -v ON_ERROR_STOP=1 -c "CREATE ROLE falx LOGIN PASSWORD 'falx' CREATEDB"
+          psql -v ON_ERROR_STOP=1 -c "ALTER DATABASE falx_test OWNER TO falx"
+          psql -v ON_ERROR_STOP=1 -d falx_test -c "GRANT ALL ON SCHEMA public TO falx"
+
+      - name: Verify
+        run: make verify
+
+      - name: Race detector on the concurrency-sensitive packages
+        run: make test-race
+
+  build:
+    name: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Cross-compile
+        run: |
+          make build-binary
+          file bin/fal-x
+
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # Prebuilt golangci-lint binaries lag behind the Go release in go.mod and
+      # refuse to lint newer code, so it is built with the toolchain set up above.
+      - uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.14.0
+          install-mode: goinstall
+          args: --timeout=5m
+
+  vulncheck:
+    name: vulncheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # Fails on a known vulnerability that the code actually reaches.
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...

@@ -1,0 +1,42 @@
+# EditorConfig, so indentation and line endings are consistent across
+# contributors' editors and so shfmt/-d can be run with matching flags.
+#
+# The shell style shfmt enforces here is its default: hard tabs for indentation,
+# spaces for alignment. Keep the two flags in sync:
+#   shfmt -d .          # must produce no output
+#   shfmt -w .          # apply
+
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+[*.sh]
+indent_style = tab
+indent_size = 4
+
+[*.{yml,yaml}]
+indent_style = space
+indent_size = 2
+
+[*.{json,jsonc}]
+indent_style = space
+indent_size = 2
+
+[*.md]
+indent_style = space
+indent_size = 2
+# Two trailing spaces are a hard line break in Markdown.
+trim_trailing_whitespace = false
+
+[Makefile]
+indent_style = tab
+
+[*.{txt,csv}]
+indent_style = space
+indent_size = 1
+# Wordlists are large; leaving them untrimmed avoids rewriting 200k lines.
+trim_trailing_whitespace = false

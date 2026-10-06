@@ -1,0 +1,30 @@
+# Fal-X scope allowlist.
+#
+# Everything here is reachable, and nothing else is. The file is required and it
+# fails closed: an absent, empty or unreadable allowlist refuses the run rather
+# than defaulting to anything.
+#
+# Copy this file to config/scope.txt and replace the examples. The two entries
+# below are placeholders that match nothing real.
+#
+# Syntax, one entry per line. Blank lines and lines starting with # are ignored.
+
+#   example.com              the domain and every subdomain
+#   *.wild.test              subdomains only, not wild.test itself
+#   192.0.2.0/24             an address range (RFC 5737 documentation space)
+#   2001:db8::1              an address (RFC 3849 documentation space)
+#   example.com:8443         one port on one host
+#
+# A bare * is refused unless you pass --allow-any, and it asks for confirmation
+# before proceeding.
+#
+# Subdomain matching is label-aware. example.com matches example.com and
+# api.example.com. It does not match example.com.attacker.test, notexample.com,
+# or evil-example.com.
+#
+# Private, loopback, link-local, carrier-NAT and cloud-metadata ranges are denied
+# even when listed here, unless you pass --allow-private.
+
+example.com
+*.wild.test
+192.0.2.0/24

@@ -1,0 +1,18 @@
+# Fal-X scope denylist.
+#
+# Entries here override the allowlist, including under --allow-any. Nothing that
+# matches is contacted, whatever else says it is reachable.
+#
+# This is the file most runs will use. It needs no flag: anything listed here is
+# skipped by every run.
+#
+# Use it for the things that are technically in scope but that you do not want
+# touched: a staging environment under development, a domain that hands over to
+# a third party, a range that belongs to someone else.
+#
+# Same syntax as the allowlist. `fal-x install --setup` writes a copy to
+# config/out-of-scope.txt, which is read automatically. --exclude points at a
+# different file for one run.
+
+admin.example.com
+*.dev.wild.test
