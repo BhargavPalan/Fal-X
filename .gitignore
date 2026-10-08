@@ -19,6 +19,10 @@ tools.lock
 *.sarif
 *.json.tmp
 
+# Built binaries (go build -o fal-x.exe, fal-x install).
+/fal-x
+/fal-x.exe
+
 # Release archives.
 dist/
 fal-x_*

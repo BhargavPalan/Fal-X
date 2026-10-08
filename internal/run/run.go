@@ -70,8 +70,11 @@ type stagesDoc struct {
 	TotalDurationSeconds int64   `json:"total_duration_seconds"`
 }
 
-// manifestDoc is the run.json document.
-type manifestDoc struct {
+// Manifest is the run.json document.
+//
+// It is exported so a consumer (the report renderer, and later the database
+// importer) reads the same structure the run writes rather than redeclaring it.
+type Manifest struct {
 	RunID     string   `json:"run_id"`
 	Target    string   `json:"target"`
 	Label     string   `json:"label"`
@@ -93,6 +96,39 @@ type manifestDoc struct {
 	Elapsed      int64 `json:"elapsed_seconds"`
 
 	ToolVersions map[string]string `json:"tool_versions,omitempty"`
+}
+
+// Load reads a finished run directory back into its manifest and stages.
+//
+// It refuses a schema version it does not understand rather than guessing, as
+// SchemaVersion promises. Stages come back in pipeline order, the order
+// stages.json was written in.
+func Load(dir string) (*Manifest, []Stage, error) {
+	var m Manifest
+	if err := readJSON(filepath.Join(dir, "run.json"), &m); err != nil {
+		return nil, nil, err
+	}
+	var doc stagesDoc
+	if err := readJSON(filepath.Join(dir, "stages.json"), &doc); err != nil {
+		return nil, nil, err
+	}
+	if doc.SchemaVersion != SchemaVersion {
+		return nil, nil, fmt.Errorf("run: %s has schema version %d, this build reads %d",
+			dir, doc.SchemaVersion, SchemaVersion)
+	}
+	return &m, doc.Stages, nil
+}
+
+// readJSON decodes one manifest file into v.
+func readJSON(path string, v any) error {
+	b, err := os.ReadFile(path) //nolint:gosec // a manifest path chosen by the operator
+	if err != nil {
+		return fmt.Errorf("run: read %s: %w", path, err)
+	}
+	if err := json.Unmarshal(b, v); err != nil {
+		return fmt.Errorf("run: decode %s: %w", path, err)
+	}
+	return nil
 }
 
 // Run is one execution of the pipeline.
@@ -433,7 +469,7 @@ func (r *Run) WriteStages() error {
 // WriteManifest writes run.json.
 func (r *Run) WriteManifest() error {
 	r.mu.Lock()
-	m := manifestDoc{
+	m := Manifest{
 		RunID:          r.ID,
 		Target:         r.target,
 		Label:          r.Label,

@@ -192,7 +192,7 @@ func printRules(b *strings.Builder, r scope.Rules) {
 // It is advisory. A missing tool fails its stage, which is recorded in
 // stages.json, rather than aborting the run before anything has been attempted.
 func missingTools() []string {
-	required := []string{"httpx", "naabu", "nuclei", "subfinder", "dnsx", "tlsx"}
+	required := []string{"httpx", "naabu", "nuclei", "subfinder", "dnsx"}
 	var missing []string
 	for _, tool := range required {
 		path, err := execLookPath(tool)

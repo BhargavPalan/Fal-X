@@ -4,8 +4,8 @@ Files here are data, not code, and they carry their upstream licences.
 
 | File | Entries | Source | Licence |
 |---|---|---|---|
-| `subdomains.txt` | 200,000 | [n0kovo/Subdomain-Scanner](https://github.com/n0kovo/Subdomain-Scanner) | GPL-3.0 |
-| `content.txt` | 47,128 | SecLists `Discovery/Web-Content/common.txt` | MIT |
+| `subdomains.txt` | 20,000 | SecLists `Discovery/DNS/subdomains-top1million-20000.txt` | MIT |
+| `content.txt` | 4,751 | SecLists `Discovery/Web-Content/common.txt` | MIT |
 | `resolvers.txt` | 26 | curated list of well-known public recursive resolvers | factual data |
 
 `resolvers.txt` was written for this project. The addresses are published
@@ -13,14 +13,24 @@ operational facts rather than anyone's creative work, so there is nothing to
 attribute. It is kept as bare addresses with no comment header because `puredns`
 reads it with a plain line reader.
 
-The other two are unmodified apart from line endings, so a diff against upstream
-shows only the change this repository made.
+The other two are fetched, not committed (`wordlists/*.txt` is gitignored). They
+are unmodified apart from line endings, blank lines and duplicates.
 
-## Why GPL-3.0 matters here
+## Fetching and updating
 
-Fal-X is GPL-3.0, which is compatible with `subdomains.txt` and therefore with
-`content.txt`. Shipping both is fine. It would not be under the MIT licence the
-project started with, which is one of the reasons the licence changed.
+```
+fal-x wordlists list              # show sources and what is present locally
+fal-x wordlists fetch             # download any file that is missing
+fal-x wordlists fetch --force     # re-download and replace existing files
+fal-x wordlists fetch subdomains  # fetch one list only
+```
+
+`fetch` never overwrites an existing file without `--force`, writes to a temporary
+file and renames it only after the download succeeds, and never touches
+`resolvers.txt`, which is hand-curated.
+
+Both fetched lists are MIT-licensed SecLists files, which is compatible with
+Fal-X's GPL-3.0.
 
 ## Replacing them
 

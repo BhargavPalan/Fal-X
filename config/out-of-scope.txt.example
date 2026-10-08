@@ -13,6 +13,3 @@
 # Same syntax as the allowlist. `fal-x install --setup` writes a copy to
 # config/out-of-scope.txt, which is read automatically. --exclude points at a
 # different file for one run.
-
-admin.example.com
-*.dev.wild.test

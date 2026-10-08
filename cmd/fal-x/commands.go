@@ -142,7 +142,7 @@ func schemaDrift(ctx context.Context, db *store.DB) (bool, error) {
 // This is deliberate rather than a silent no-op: a command that accepts flags
 // and does nothing is worse than one that says it is not available.
 func notBuilt(cmd, phase string) error {
-	return logging.Usagef("%s is not available yet; it lands in %s. See docs/ROADMAP.md", cmd, phase)
+	return logging.Usagef("%s is not available yet; it lands in %s", cmd, phase)
 }
 
 func runIntel(_ context.Context, _ []string) error {
@@ -166,7 +166,6 @@ func runExploit(_ context.Context, _ []string) error {
 func runSession(_ context.Context, _ []string) error {
 	return notBuilt("session", "phase 7, post-exploitation")
 }
-func runReport(_ context.Context, _ []string) error { return notBuilt("report", "phase 3, reporting") }
-func runServe(_ context.Context, _ []string) error  { return notBuilt("serve", "phase 8, the HTTP API") }
+func runServe(_ context.Context, _ []string) error { return notBuilt("serve", "phase 8, the HTTP API") }
 
 var _ = config.Version

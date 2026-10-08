@@ -12,7 +12,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -102,9 +104,9 @@ func New() *Exec {
 // There is no shell anywhere in this path. Arguments reach the child exactly as
 // given, which is what makes a value containing a space safe.
 func (e *Exec) Run(ctx context.Context, name string, args ...string) (Result, error) {
-	path, err := exec.LookPath(name)
+	path, err := Resolve(name)
 	if err != nil {
-		return Result{}, fmt.Errorf("%w: %s", ErrNotFound, name)
+		return Result{}, err
 	}
 
 	if e.Timeout > 0 {
@@ -170,8 +172,57 @@ func (e *Exec) Run(ctx context.Context, name string, args ...string) (Result, er
 
 // Available reports whether a tool is on PATH.
 func (e *Exec) Available(name string) bool {
-	_, err := exec.LookPath(name)
+	_, err := Resolve(name)
 	return err == nil
+}
+
+var (
+	genuineMu    sync.Mutex
+	genuineCache = map[string]bool{}
+)
+
+// Resolve finds name on PATH. A same-named program that is not the expected
+// tool is skipped, because the Python httpx CLI installs an httpx executable
+// that shadows ProjectDiscovery's.
+func Resolve(name string) (string, error) {
+	first, err := exec.LookPath(name)
+	if err != nil {
+		return "", fmt.Errorf("%w: %s", ErrNotFound, name)
+	}
+	if genuine(name, first) {
+		return first, nil
+	}
+	for _, dir := range filepath.SplitList(os.Getenv("PATH")) {
+		if dir == "" {
+			continue
+		}
+		p, err := exec.LookPath(filepath.Join(dir, name))
+		if err == nil && genuine(name, p) {
+			return p, nil
+		}
+	}
+	return "", fmt.Errorf("%w: %s on PATH (%s) is not the ProjectDiscovery tool",
+		ErrNotFound, name, first)
+}
+
+// genuine reports whether the binary at path is the ProjectDiscovery tool of
+// that name. Only httpx is ambiguous in practice, so only it is probed.
+func genuine(name, path string) bool {
+	if name != "httpx" {
+		return true
+	}
+	genuineMu.Lock()
+	defer genuineMu.Unlock()
+	if v, ok := genuineCache[path]; ok {
+		return v
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, path, "-version").CombinedOutput() //nolint:gosec // path comes from a PATH lookup and the one argument is fixed
+	low := strings.ToLower(string(out))
+	ok := err == nil && (strings.Contains(low, "current version") || strings.Contains(low, "projectdiscovery"))
+	genuineCache[path] = ok
+	return ok
 }
 
 // Missing returns the subset of names that is not installed, in the order given.

@@ -1,6 +1,7 @@
 package stage
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -137,7 +138,7 @@ func TestHTTPGatesBeforeProbing(t *testing.T) {
 	// and HTTP stages run concurrently and this one must not wait on the other.
 	h.seed(h.paths.Resolved(), "example.com\nadmin.example.com\n198.51.100.5\n")
 
-	gated := h.paths.HTTPDir + "/targets.scoped.txt"
+	gated := filepath.Join(h.paths.HTTPDir, "targets.scoped.txt")
 	h.fx.on("httpx", []string{
 		"-silent", "-no-color", "-l", gated, "-threads", "10",
 		"-rate-limit", "150", "-timeout", "10",
@@ -172,7 +173,7 @@ func TestHTTPDropsOutOfScopeRedirectResults(t *testing.T) {
 	h := newHarness(t, "example.com\n", "")
 	h.seed(h.paths.Resolved(), "example.com\n")
 
-	gated := h.paths.HTTPDir + "/targets.scoped.txt"
+	gated := filepath.Join(h.paths.HTTPDir, "targets.scoped.txt")
 	h.fx.on("httpx", []string{
 		"-silent", "-no-color", "-l", gated, "-threads", "10",
 		"-rate-limit", "150", "-timeout", "10",
@@ -206,7 +207,7 @@ func TestHTTPToleratesNonJSONLines(t *testing.T) {
 	h := newHarness(t, "example.com\n", "")
 	h.seed(h.paths.Resolved(), "example.com\n")
 
-	gated := h.paths.HTTPDir + "/targets.scoped.txt"
+	gated := filepath.Join(h.paths.HTTPDir, "targets.scoped.txt")
 	h.fx.on("httpx", []string{
 		"-silent", "-no-color", "-l", gated, "-threads", "10",
 		"-rate-limit", "150", "-timeout", "10",
@@ -235,7 +236,7 @@ func TestScanGatesBeforeRunningTemplates(t *testing.T) {
 	h.seed(h.paths.HTTPHosts(),
 		"https://example.com\nhttps://admin.example.com\nhttps://attacker.test\n")
 
-	gated := h.paths.ScanDir + "/targets.scoped.txt"
+	gated := filepath.Join(h.paths.ScanDir, "targets.scoped.txt")
 	h.fx.on("nuclei", []string{
 		"-silent", "-l", gated, "-severity", "low,medium,high,critical",
 		"-c", "10", "-rl", "300", "-no-color",
@@ -262,7 +263,7 @@ func TestScanDropsFindingsNamingAnOutOfScopeHost(t *testing.T) {
 	h := newHarness(t, "example.com\n", "")
 	h.seed(h.paths.HTTPHosts(), "https://example.com\nhttps://attacker.test\n")
 
-	gated := h.paths.ScanDir + "/targets.scoped.txt"
+	gated := filepath.Join(h.paths.ScanDir, "targets.scoped.txt")
 	h.fx.on("nuclei", []string{
 		"-silent", "-l", gated, "-severity", "low,medium,high,critical",
 		"-c", "10", "-rl", "300", "-no-color",
@@ -294,7 +295,7 @@ func TestScanZeroFindingsIsNotAFailure(t *testing.T) {
 	h := newHarness(t, standardAllow, standardDeny)
 	h.seed(h.paths.HTTPHosts(), "https://example.com\n")
 
-	gated := h.paths.ScanDir + "/targets.scoped.txt"
+	gated := filepath.Join(h.paths.ScanDir, "targets.scoped.txt")
 	h.fx.on("nuclei", []string{
 		"-silent", "-l", gated, "-severity", "low,medium,high,critical",
 		"-c", "10", "-rl", "300", "-no-color",
@@ -315,7 +316,7 @@ func TestScanFastProfileDisablesInteractiveTemplates(t *testing.T) {
 	h.env.Opts.NucleiNoInteract = true
 	h.env.Opts.NucleiSeverity = "medium,high,critical"
 
-	gated := h.paths.ScanDir + "/targets.scoped.txt"
+	gated := filepath.Join(h.paths.ScanDir, "targets.scoped.txt")
 	h.fx.on("nuclei", []string{
 		"-silent", "-l", gated, "-severity", "medium,high,critical",
 		"-c", "10", "-rl", "300", "-no-color", "-ni",

@@ -1,6 +1,7 @@
 package stage
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -225,7 +226,7 @@ func TestResolveGatesCandidatesBeforeResolving(t *testing.T) {
 	// An out-of-scope candidate alongside in-scope ones.
 	h.seed(h.paths.Subs(), "api.example.com\nadmin.example.com\nattacker.test\n")
 
-	gatedPath := h.paths.ResolveDir + "/candidates.scoped.txt"
+	gatedPath := filepath.Join(h.paths.ResolveDir, "candidates.scoped.txt")
 	h.fx.on("dnsx", []string{"-silent", "-t", "10", "-l", gatedPath}, "api.example.com\nexample.com\n")
 	h.fx.on("dnsx", []string{"-silent", "-nc", "-l", h.paths.Resolved(),
 		"-a", "-aaaa", "-cname", "-ns", "-mx", "-resp", "-resp-only"},
@@ -258,7 +259,7 @@ func TestResolveExtractsBothAddressFamilies(t *testing.T) {
 	h := newHarness(t, "example.com\n2001:db8::/32\n192.0.2.0/24\n", "")
 	h.seed(h.paths.Roots(), "example.com\n")
 
-	h.fx.on("dnsx", []string{"-silent", "-t", "10", "-l", h.paths.ResolveDir + "/candidates.scoped.txt"},
+	h.fx.on("dnsx", []string{"-silent", "-t", "10", "-l", filepath.Join(h.paths.ResolveDir, "candidates.scoped.txt")},
 		"example.com\n")
 	h.fx.on("dnsx", []string{"-silent", "-nc", "-l", h.paths.Resolved(),
 		"-a", "-aaaa", "-cname", "-ns", "-mx", "-resp", "-resp-only"},
@@ -287,7 +288,7 @@ func TestResolveGatesExtractedAddresses(t *testing.T) {
 	h := newHarness(t, "example.com\n192.0.2.0/24\n", "")
 	h.seed(h.paths.Roots(), "example.com\n")
 
-	h.fx.on("dnsx", []string{"-silent", "-t", "10", "-l", h.paths.ResolveDir + "/candidates.scoped.txt"},
+	h.fx.on("dnsx", []string{"-silent", "-t", "10", "-l", filepath.Join(h.paths.ResolveDir, "candidates.scoped.txt")},
 		"example.com\n")
 	// The name resolves to an address outside the authorized range.
 	h.fx.on("dnsx", []string{"-silent", "-nc", "-l", h.paths.Resolved(),

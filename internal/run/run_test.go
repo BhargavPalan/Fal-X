@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -282,7 +283,7 @@ func TestRunJSONRecordsTheAuthorizedScope(t *testing.T) {
 // A run directory holds findings, which routinely include secret-shaped
 // matches. Mode 0700 keeps that off other accounts on a shared host.
 func TestRunDirectoryIsPrivate(t *testing.T) {
-	if os.Getenv("GOOS") == "windows" {
+	if runtime.GOOS == "windows" {
 		t.Skip("POSIX modes are not meaningful on Windows")
 	}
 	r := newTestRun(t)

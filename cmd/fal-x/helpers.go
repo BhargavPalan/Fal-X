@@ -2,10 +2,11 @@ package main
 
 import (
 	"fmt"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/BhargavPalan/Fal-X/internal/tools"
 )
 
 // execLookPath resolves a tool on PATH, returning the candidate path.
@@ -13,7 +14,7 @@ import (
 // The plan needs to know whether a tool is installed before deciding whether to
 // warn about it. It returns a path that may not exist, so a caller must stat it
 // rather than test for a non-empty string.
-func execLookPath(tool string) (string, error) { return exec.LookPath(tool) }
+func execLookPath(tool string) (string, error) { return tools.Resolve(tool) }
 
 // filepathJoin is a thin alias so this file does not import path/filepath under
 // a name that shadows the local variables used here.

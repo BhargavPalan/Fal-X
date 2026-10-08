@@ -22,6 +22,8 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
+	"github.com/BhargavPalan/Fal-X/internal/tools"
 )
 
 // Tool is one external binary Fal-X can drive.
@@ -79,7 +81,7 @@ func selected(withOpt bool) []Tool {
 
 // available reports whether a binary is on PATH.
 func available(name string) bool {
-	_, err := exec.LookPath(name)
+	_, err := tools.Resolve(name)
 	return err == nil
 }
 
@@ -198,7 +200,7 @@ func writeLock(ctx context.Context, w io.Writer, withOpt bool) {
 	fmt.Fprintf(bw, "# generated_at: %s\n", time.Now().UTC().Format(time.RFC3339))
 	fmt.Fprintf(bw, "# host:         %s/%s\n#\n", runtime.GOOS, runtime.GOARCH)
 	for _, t := range selected(withOpt) {
-		if p, err := exec.LookPath(t.Name); err == nil {
+		if p, err := tools.Resolve(t.Name); err == nil {
 			fmt.Fprintf(bw, "%s\t%s\t%s\n", t.Name, moduleVersion(ctx, p), p)
 		}
 	}

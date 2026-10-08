@@ -282,3 +282,20 @@ func TestInvocationLineRoundTripsArgumentsWithSpaces(t *testing.T) {
 		t.Errorf("Line = %q, want it to preserve the space inside the argument", line)
 	}
 }
+
+// TestResolveSkipsShadowingHTTPX pins that an httpx which is not the
+// ProjectDiscovery tool (the Python CLI installs one) does not count as installed.
+func TestResolveSkipsShadowingHTTPX(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses a shell script as the fake binary")
+	}
+	dir := t.TempDir()
+	fake := filepath.Join(dir, "httpx")
+	if err := os.WriteFile(fake, []byte("#!/bin/sh\necho 'No such option' >&2\nexit 2\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+	if _, err := Resolve("httpx"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("a non-ProjectDiscovery httpx resolved: %v", err)
+	}
+}

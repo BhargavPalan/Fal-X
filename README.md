@@ -18,6 +18,7 @@ The later stages of the finding lifecycle are specified but not yet built:
 | Area | State |
 |---|---|
 | Reconnaissance (domains, hosts, ports, HTTP, content, scan) | shipped |
+| Reports (Markdown, JSON, SARIF) | shipped |
 | Vulnerability intelligence (CVE/KEV correlation) | planned |
 | Asset graph and exposure matching | planned |
 | Prioritization | planned |
@@ -57,6 +58,8 @@ go build -o bin/fal-x ./cmd/fal-x    # on Windows: go build -o bin\fal-x.exe .\c
 bin/fal-x install                    # installs the external reconnaissance tools
 bin/fal-x install --check            # report what is present and missing
 bin/fal-x install --with-opt         # also install the optional-stage tools
+bin/fal-x install --setup            # only create the local config files
+bin/fal-x wordlists fetch            # download the brute-force wordlists
 ```
 
 `fal-x install` installs the external tools on every platform with `go
@@ -66,33 +69,38 @@ covered by the one command. Tools are installed at their latest release and the
 exact versions that land are recorded in `tools.lock`. It needs Go on PATH (1.27
 or newer); `fal-x` itself is a standard `go build`.
 
+The tools land in `$(go env GOPATH)/bin` (`~/go/bin`, or `%USERPROFILE%\go\bin` on
+Windows), which must be on your PATH. `fal-x install --check` lists what is
+present and what is missing. `amass` and `puredns` are optional and installed
+only with `--with-opt`.
+
 `naabu`'s fast SYN scan needs [Npcap](https://npcap.com) on Windows; without it
 naabu falls back to a slower CONNECT scan. `nmap` (optional, used only with
 `--nmap`) is installed separately from <https://nmap.org/download>.
 
-## Releases
+### Wordlists
 
-Prebuilt binaries for Linux, macOS and Windows (amd64 and arm64) are attached to
-each [GitHub Release](https://github.com/BhargavPalan/Fal-X/releases), alongside a
-`checksums.txt` and a software bill of materials. Download the archive for your
-platform, verify it against the checksum, and extract the binary.
+The brute-force stages (`--brute`, `--dirs`) read wordlists from `wordlists/`.
+They are not committed; fetch them once after cloning:
 
-Releases follow semantic versioning and are cut from signed git tags (`vX.Y.Z`).
-The version, commit and build time are compiled into the binary; `fal-x version`
-reports them:
-
+```sh
+fal-x wordlists list                 # sources, local entry counts, licences
+fal-x wordlists fetch                # download any list that is missing
+fal-x wordlists fetch --force        # re-download and replace existing lists
+fal-x wordlists fetch subdomains     # one list only (subdomains, content)
 ```
-fal-x 0.3.0
-commit:   a1b2c3d4...
-built:    2026-01-01T00:00:00Z
-go:       go1.27.1
-platform: linux/amd64
-```
+
+Both lists come from [SecLists](https://github.com/danielmiessler/SecLists)
+(MIT). `fetch` never overwrites an existing file without `--force`, so your own
+edits are safe, and it swaps a file in only after the whole download succeeds.
+Without a list, a stage that needs it reports so and carries on with less
+coverage. See [wordlists/README.md](wordlists/README.md) for details.
 
 ## Quick start
 
 ```sh
 # Scan a target. This is the whole interface.
+# (scanme.nmap.org is a host the Nmap project provides for testing.)
 fal-x scan scanme.nmap.org
 
 # See what a run would do, and what is missing. Contacts nothing.
@@ -104,6 +112,25 @@ fal-x scan example.com --scope config/scope.txt
 # Ask why a target would be allowed or denied. Contacts nothing.
 fal-x scan --scope config/scope.txt --why-denied api.example.com
 ```
+
+## Reports
+
+`fal-x report` turns a finished run into a document you can hand to someone else.
+It only reads files the run already wrote, so it contacts nothing.
+
+```sh
+fal-x report                                   # newest run, as Markdown, to stdout
+fal-x report --target example.com              # newest run of one target
+fal-x report --run output/example.com/<stamp>  # a specific run
+fal-x report --format json                     # machine-readable
+fal-x report --format sarif --out findings.sarif   # for code-scanning tools
+fal-x report --format md,json,sarif --out reports/ # several at once
+```
+
+A stage that never ran is reported as "not produced", with the reason from
+`stages.json`, which is different from a stage that ran and found nothing.
+Text that came from a scanned host (page titles, banners) is escaped, not
+rendered.
 
 There is no "I have authorization" flag. You have already named the target, and
 a flag people type reflexively stops being a signal.
@@ -118,6 +145,25 @@ Exactly one of `-d`, `-l`, `-ip` or `-asn`:
 -ip 192.0.2.0/29     addresses or ranges, skipping domain discovery
 -asn AS12345         an autonomous system, expanded to its netblocks
 ```
+
+## Common options
+
+```
+--scope <file>       hold the run to an allowlist
+--exclude <file>     denylist for this run (default: config/out-of-scope.txt)
+--dry-run            validate inputs and print the plan; contacts nothing
+--profile <name>     fast, normal or exhaustive
+--stages <list>      run a comma-separated subset of the stages
+--skip-scan          omit the nuclei vulnerability scanning stage
+--ports <spec>       ports to scan, for example 80,443 or 8000-8100
+--output <dir>       output root (default ./output)
+--yes                answer the wide-target confirmation without prompting
+```
+
+Opt-in stages that send extra traffic: `--brute` (DNS brute force), `--dirs`
+(directory brute force with ffuf), `--deep` (amass passive enumeration),
+`--nmap` (service detection) and `--censys` (passive enrichment, needs a token
+in `config/.env`). Run `fal-x scan --help` for the full list.
 
 ## Scope and exclusions
 
@@ -138,11 +184,10 @@ To exclude specific hosts from any run, list them in `config/out-of-scope.txt`
 ```
 staging.example.com
 *.dev.example.com
-admin.example.com
 ```
 
 ```sh
-fal-x scan example.com     # everything except the three above
+fal-x scan example.com     # everything except the two above
 ```
 
 ## Output
@@ -214,6 +259,25 @@ Four rules hold the authorization boundary in place:
    be read two different ways in two different packages.
 4. `internal/tools` is the only place an external binary is launched. Arguments
    are a string slice and never reach a shell.
+
+## Releases
+
+Prebuilt binaries for Linux, macOS and Windows (amd64 and arm64) are attached to
+each [GitHub Release](https://github.com/BhargavPalan/Fal-X/releases), alongside a
+`checksums.txt` and a software bill of materials. Download the archive for your
+platform, verify it against the checksum, and extract the binary.
+
+Releases follow semantic versioning and are cut from signed git tags (`vX.Y.Z`).
+The version, commit and build time are compiled into the binary; `fal-x version`
+reports them:
+
+```
+fal-x 0.2.0
+commit:   a1b2c3d4...
+built:    2026-01-01T00:00:00Z
+go:       go1.27.1
+platform: linux/amd64
+```
 
 ## License
 

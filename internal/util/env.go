@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"runtime"
 	"strings"
 )
 
@@ -185,6 +186,11 @@ func isSpace(c byte) bool {
 // Advisory rather than fatal: a file on a mounted volume can carry an
 // unavoidable mode, and refusing to run would be worse than saying so.
 func CheckEnvFilePerms(path string) []EnvWarning {
+	// Windows reports a fixed 0666 for every file, so the mode says nothing
+	// about who can read it and a warning would fire on every run.
+	if runtime.GOOS == "windows" {
+		return nil
+	}
 	fi, err := os.Stat(path)
 	if err != nil || fi.IsDir() {
 		return nil

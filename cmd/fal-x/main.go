@@ -11,6 +11,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -46,6 +47,7 @@ var commands = []command{
 	{"serve", "run the HTTP API", runServe},
 	{"migrate", "apply, roll back, or inspect database migrations", runMigrate},
 	{"install", "install the external reconnaissance tools for this platform", runInstall},
+	{"wordlists", "list or fetch the open-source wordlists for brute-force stages", runWordlists},
 	{"version", "print version information", runVersion},
 }
 
@@ -264,9 +266,32 @@ func parseFlags(fs *flag.FlagSet, synopsis string, args []string) error {
 	return nil
 }
 
-func runVersion(_ context.Context, _ []string) error {
+func runVersion(_ context.Context, args []string) error {
+	fs := flagSet("version")
+	asJSON := fs.Bool("json", false, "print the version information as JSON")
+	if err := parseFlags(fs, "fal-x version [--json]", args); err != nil {
+		return err
+	}
+
+	rev, built := buildVCS()
+	if *asJSON {
+		b, err := json.MarshalIndent(map[string]string{
+			"version":  config.Version,
+			"commit":   rev,
+			"built":    built,
+			"go":       runtime.Version(),
+			"platform": runtime.GOOS + "/" + runtime.GOARCH,
+			"home":     config.Home(),
+		}, "", "  ")
+		if err != nil {
+			return err
+		}
+		fmt.Println(string(b))
+		return nil
+	}
+
 	fmt.Printf("fal-x %s\n", config.Version)
-	if rev, built := buildVCS(); rev != "" {
+	if rev != "" {
 		fmt.Printf("commit:   %s\n", rev)
 		if built != "" {
 			fmt.Printf("built:    %s\n", built)

@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -219,7 +220,7 @@ func TestEnvFileMissingFile(t *testing.T) {
 // TestEnvFileCheckPerms pins that a world-readable credentials file is
 // reported.
 func TestEnvFileCheckPerms(t *testing.T) {
-	if os.Getenv("GOOS") == "windows" {
+	if runtime.GOOS == "windows" {
 		t.Skip("POSIX modes are not meaningful on Windows")
 	}
 	dir := t.TempDir()
