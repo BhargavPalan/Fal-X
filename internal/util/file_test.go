@@ -3,6 +3,7 @@ package util
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -14,43 +15,20 @@ func write(t *testing.T, path, content string) string {
 	return path
 }
 
-// TestCount pins the regression that produced "00 live hosts" in a report.
-//
-// Count must return exactly one zero for an absent, empty, or blank-lines-only
-// file. Two zeros read as a row count in a report.
-func TestCount(t *testing.T) {
-	dir := t.TempDir()
-
-	if got := Count(filepath.Join(dir, "absent.txt")); got != 0 {
-		t.Errorf("Count(absent) = %d, want 0", got)
+// nonBlankLines counts the non-empty lines in a file; an absent file is 0.
+func nonBlankLines(t *testing.T, path string) int {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return 0
 	}
-
-	empty := write(t, filepath.Join(dir, "empty.txt"), "")
-	if got := Count(empty); got != 0 {
-		t.Errorf("Count(empty) = %d, want 0", got)
+	n := 0
+	for _, l := range strings.Split(string(b), "\n") {
+		if strings.TrimSpace(l) != "" {
+			n++
+		}
 	}
-
-	blank := write(t, filepath.Join(dir, "blank.txt"), "\n\n\n")
-	if got := Count(blank); got != 0 {
-		t.Errorf("Count(blank lines only) = %d, want 0", got)
-	}
-
-	one := write(t, filepath.Join(dir, "one.txt"), "a\n")
-	if got := Count(one); got != 1 {
-		t.Errorf("Count(one line) = %d, want 1", got)
-	}
-
-	// No trailing newline is the shape a killed process leaves behind, and it
-	// must still count.
-	noNL := write(t, filepath.Join(dir, "nonl.txt"), "a\nb\nc")
-	if got := Count(noNL); got != 3 {
-		t.Errorf("Count(no trailing newline) = %d, want 3", got)
-	}
-
-	mixed := write(t, filepath.Join(dir, "mixed.txt"), "a\n\n\nb\n\n")
-	if got := Count(mixed); got != 2 {
-		t.Errorf("Count(blank lines interleaved) = %d, want 2", got)
-	}
+	return n
 }
 
 // TestClean pins in-place sort and dedupe, which several stages rely on for a
@@ -62,7 +40,7 @@ func TestClean(t *testing.T) {
 	if err := Clean(p); err != nil {
 		t.Fatalf("Clean: %v", err)
 	}
-	if got := Count(p); got != 3 {
+	if got := nonBlankLines(t, p); got != 3 {
 		t.Errorf("Count after Clean = %d, want 3", got)
 	}
 	b, err := os.ReadFile(p)
@@ -77,22 +55,6 @@ func TestClean(t *testing.T) {
 	// know whether the producer ran.
 	if err := Clean(filepath.Join(dir, "absent.txt")); err != nil {
 		t.Errorf("Clean(absent) = %v, want nil", err)
-	}
-}
-
-// TestDedupeInto pins merging several files, skipping absent ones.
-func TestDedupeInto(t *testing.T) {
-	dir := t.TempDir()
-
-	m1 := write(t, filepath.Join(dir, "m1"), "x\ny\n")
-	m2 := write(t, filepath.Join(dir, "m2"), "y\nz\n")
-	out := filepath.Join(dir, "merged.txt")
-
-	if err := DedupeInto(out, m1, m2, filepath.Join(dir, "absent")); err != nil {
-		t.Fatalf("DedupeInto: %v", err)
-	}
-	if got := Count(out); got != 3 {
-		t.Errorf("Count after DedupeInto = %d, want 3", got)
 	}
 }
 
@@ -114,7 +76,7 @@ func TestTruncateFileCreatesParents(t *testing.T) {
 	if err := TruncateFile(p); err != nil {
 		t.Fatalf("TruncateFile on existing: %v", err)
 	}
-	if got := Count(p); got != 0 {
+	if got := nonBlankLines(t, p); got != 0 {
 		t.Errorf("TruncateFile left %d lines, want 0", got)
 	}
 }
@@ -160,74 +122,10 @@ func TestReadLinesStripsCR(t *testing.T) {
 	}
 }
 
-// TestFingerprint pins cache invalidation behaviour for --resume.
-//
-// The contract that matters: unchanged input gives an unchanged fingerprint,
-// changed input gives a different one, and a missing file contributes something
-// distinct rather than being silently ignored. If absent contributed nothing,
-// then deleting a stage input would look like an unchanged run.
-func TestFingerprint(t *testing.T) {
-	dir := t.TempDir()
-	f := write(t, filepath.Join(dir, "fp.txt"), "hello\n")
-
-	first, err := Fingerprint(f)
-	if err != nil {
-		t.Fatalf("Fingerprint: %v", err)
-	}
-	again, _ := Fingerprint(f)
-	if first != again {
-		t.Error("Fingerprint is unstable for unchanged input")
-	}
-
-	write(t, f, "world\n")
-	changed, _ := Fingerprint(f)
-	if first == changed {
-		t.Error("Fingerprint did not change with content")
-	}
-
-	withAbsent, _ := Fingerprint(f, filepath.Join(dir, "absent"))
-	if changed == withAbsent {
-		t.Error("an absent file contributed nothing to the fingerprint")
-	}
-}
-
-// TestFingerprintOrderMatters pins that argument order is significant, so a
-// caller that reorders its inputs invalidates the cache instead of silently
-// reusing a result computed over a different set.
-func TestFingerprintOrderMatters(t *testing.T) {
-	dir := t.TempDir()
-	a := write(t, filepath.Join(dir, "a"), "1")
-	b := write(t, filepath.Join(dir, "b"), "2")
-
-	ab, _ := Fingerprint(a, b)
-	ba, _ := Fingerprint(b, a)
-	if ab == ba {
-		t.Error("Fingerprint ignores argument order")
-	}
-}
-
-// TestFileSizeBytes pins that an absent file is 0 rather than an error, since
-// stages check it before a producer has run.
-func TestFileSizeBytes(t *testing.T) {
-	dir := t.TempDir()
-
-	if got := FileSizeBytes(filepath.Join(dir, "absent")); got != 0 {
-		t.Errorf("FileSizeBytes(absent) = %d, want 0", got)
-	}
-
-	p := write(t, filepath.Join(dir, "f.txt"), "12345")
-	if got := FileSizeBytes(p); got != 5 {
-		t.Errorf("FileSizeBytes = %d, want 5", got)
-	}
-}
-
-// TestSHA256 pins the digest against a known value, because these hashes key
-// download filenames and cache entries.
+// TestSHA256 pins the digest against a known value, because the scope digests
+// recorded with each run are compared across runs.
 func TestSHA256(t *testing.T) {
-	got, err := SHA256String("hello\n")
-	if err != nil {
-		t.Fatal(err)
-	}
+	got := SHA256String("hello\n")
 	const want = "5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03"
 	if got != want {
 		t.Errorf("SHA256String(hello) = %s, want %s", got, want)
@@ -254,7 +152,7 @@ func TestWriteLinesAtomic(t *testing.T) {
 	if err := WriteLines(p, []string{"z"}); err != nil {
 		t.Fatalf("WriteLines rewrite: %v", err)
 	}
-	if got := Count(p); got != 1 {
+	if got := nonBlankLines(t, p); got != 1 {
 		t.Errorf("WriteLines appended instead of replacing: %d lines", got)
 	}
 

@@ -53,7 +53,7 @@ func TestPipelineGroupsMatchTheDocumentedOrder(t *testing.T) {
 			if len(g) != 2 {
 				continue
 			}
-			names := groupNames([][]stageEntry{g})[0]
+			names := groupNames([][]Stage{g})[0]
 			if strings.Contains(names, "ports") && strings.Contains(names, "http") {
 				t.Errorf("group %q runs ports and http together in IP mode", names)
 			}
@@ -64,7 +64,7 @@ func TestPipelineGroupsMatchTheDocumentedOrder(t *testing.T) {
 		for _, ipMode := range []bool{false, true} {
 			found := false
 			for _, g := range pipelineGroups(ipMode) {
-				if len(g) == 2 && groupNames([][]stageEntry{g})[0] == "content+scan" {
+				if len(g) == 2 && groupNames([][]Stage{g})[0] == "content+scan" {
 					found = true
 				}
 			}
@@ -76,12 +76,12 @@ func TestPipelineGroupsMatchTheDocumentedOrder(t *testing.T) {
 }
 
 // groupNames renders each group as a readable label.
-func groupNames(groups [][]stageEntry) []string {
+func groupNames(groups [][]Stage) []string {
 	out := make([]string, 0, len(groups))
 	for _, g := range groups {
 		names := make([]string, 0, len(g))
 		for _, s := range g {
-			names = append(names, s.name)
+			names = append(names, s.Name)
 		}
 		out = append(out, strings.Join(names, "+"))
 	}
@@ -99,19 +99,13 @@ func TestConcurrentStagesAreAllRecorded(t *testing.T) {
 
 	// Two slow stages so the ordering of the joins is exercised.
 	slow := make(chan struct{})
-	a, err := r.StageAsync("alpha", func() error {
+	a := r.StageAsync("alpha", func() error {
 		<-slow
 		return nil
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	b, err := r.StageAsync("beta", func() error {
+	b := r.StageAsync("beta", func() error {
 		return nil
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 
 	if err := b.Wait(); err != nil {
 		t.Errorf("beta reported %v", err)
@@ -140,20 +134,14 @@ func TestConcurrentStagesAreAllRecorded(t *testing.T) {
 func TestConcurrentNotesStayWithTheirOwnStage(t *testing.T) {
 	r := newHarness(t, standardAllow, standardDeny).env.Run
 
-	a, err := r.StageAsync("alpha", func() error {
+	a := r.StageAsync("alpha", func() error {
 		r.SetNote("alpha", "alpha note")
 		return nil
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	b, err := r.StageAsync("beta", func() error {
+	b := r.StageAsync("beta", func() error {
 		r.SetNote("beta", "beta note")
 		return nil
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	_ = a.Wait()
 	_ = b.Wait()
 

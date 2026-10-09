@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -97,7 +98,7 @@ func Lookup(names []string) ([]Source, error) {
 }
 
 func knownNames() string {
-	var names []string
+	names := make([]string, 0, len(Sources))
 	for _, s := range Sources {
 		names = append(names, s.Name)
 	}
@@ -110,7 +111,7 @@ func List(w io.Writer, dir string) {
 	for _, s := range Sources {
 		status := "missing"
 		if n, err := countLines(filepath.Join(dir, s.File)); err == nil {
-			status = fmt.Sprintf("%d", n)
+			status = strconv.Itoa(n)
 		}
 		fmt.Fprintf(w, "%-12s %-14s %-9s %-16s %s\n", s.Name, s.File, status, s.Use, s.Licence)
 	}
@@ -159,7 +160,7 @@ func fetchOne(ctx context.Context, client *http.Client, s Source, dest string) (
 	if !strings.HasPrefix(s.URL, "https://") {
 		return 0, "", fmt.Errorf("refusing non-https source %q", s.URL)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.URL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.URL, http.NoBody)
 	if err != nil {
 		return 0, "", err
 	}

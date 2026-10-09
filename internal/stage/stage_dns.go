@@ -2,6 +2,8 @@ package stage
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"net/netip"
 	"path/filepath"
@@ -71,7 +73,7 @@ func Roots(ctx context.Context, e *Env) error {
 	var candidates []string
 	seen := make(map[string]struct{})
 	for _, line := range raw {
-		d := strings.TrimSpace(stripAllSpace(line))
+		d := stripAllSpace(line)
 		if d == "" {
 			continue
 		}
@@ -112,7 +114,7 @@ func Roots(ctx context.Context, e *Env) error {
 	logging.Ok("roots: %d root domain(s)", len(kept))
 	if len(kept) == 0 {
 		e.Run.SetNote("roots", "all roots were out of scope")
-		return fmt.Errorf("every root domain was refused by the scope allowlist")
+		return errors.New("every root domain was refused by the scope allowlist")
 	}
 	return nil
 }
@@ -137,19 +139,15 @@ func Subs(ctx context.Context, e *Env) error {
 	e.Run.SetInputs(len(roots))
 	logging.Info("enumerating subdomains across %d root domain(s)", len(roots))
 
-	collectors := []struct {
-		name string
-		fn   func(context.Context, *Env, []string) ([]string, error)
-	}{
+	collectors := []collector{
 		{"subfinder", collectSubfinder},
 		{"amass", collectAmass},
 		{"crtsh", collectCRTSh},
 		{"brute", collectBrute},
 	}
 
-	// Each collector writes its own file. A collector that panics or is
-	// cancelled still leaves the file present, so the merge below never has to
-	// distinguish "nothing found" from "never ran" by absence.
+	// Each collector writes its own file, present even when it failed, so the merge
+	// below never has to tell "nothing found" from "never ran" by absence.
 	type result struct {
 		name  string
 		lines []string
@@ -158,18 +156,10 @@ func Subs(ctx context.Context, e *Env) error {
 	results := make(chan result, len(collectors))
 
 	for _, c := range collectors {
-		go func(c struct {
-			name string
-			fn   func(context.Context, *Env, []string) ([]string, error)
-		}) {
-			defer func() {
-				if rec := recover(); rec != nil {
-					results <- result{name: c.name, err: fmt.Errorf("collector panicked: %v", rec)}
-				}
-			}()
+		go func() {
 			lines, err := safeCollect(ctx, c.fn, e, roots)
 			results <- result{name: c.name, lines: lines, err: err}
-		}(c)
+		}()
 	}
 
 	var raw []string
@@ -224,19 +214,24 @@ func Subs(ctx context.Context, e *Env) error {
 
 	if len(inScope) == 0 {
 		e.Run.SetNote("subs", "no in-scope subdomains found")
-		return fmt.Errorf("subdomain enumeration produced no in-scope results")
+		return errors.New("subdomain enumeration produced no in-scope results")
 	}
 	return nil
 }
 
-// collectSubfinder runs subfinder over the roots.
-func collectSubfinder(ctx context.Context, e *Env, roots []string) ([]string, error) {
+// collector gathers candidate subdomains for the roots from one source.
+type collector struct {
+	name string
+	fn   func(context.Context, *Env, []string) ([]string, error)
+}
+
+func collectSubfinder(ctx context.Context, e *Env, _ []string) ([]string, error) {
 	if !e.Tools.Available("subfinder") {
-		return nil, fmt.Errorf("subfinder not installed")
+		return nil, errors.New("subfinder not installed")
 	}
 	return runLines(ctx, e, "subfinder",
 		"-silent", "-all", "-timeout", "20",
-		"-t", itoa(e.Opts.Threads),
+		"-t", strconv.Itoa(e.Opts.Threads),
 		"-dL", e.Paths.Roots())
 }
 
@@ -248,7 +243,7 @@ func collectAmass(ctx context.Context, e *Env, roots []string) ([]string, error)
 		return nil, nil
 	}
 	if !e.Tools.Available("amass") {
-		return nil, fmt.Errorf("amass not installed")
+		return nil, errors.New("amass not installed")
 	}
 
 	var out []string
@@ -267,13 +262,13 @@ func collectAmass(ctx context.Context, e *Env, roots []string) ([]string, error)
 }
 
 // collectBrute runs DNS brute force, which is opt-in.
-func collectBrute(ctx context.Context, e *Env, roots []string) ([]string, error) {
+func collectBrute(ctx context.Context, e *Env, _ []string) ([]string, error) {
 	if !e.Opts.Brute {
 		return nil, nil
 	}
 	if !e.Tools.Available("puredns") {
 		logging.Warn("brute force requested but puredns is not installed")
-		return nil, fmt.Errorf("puredns not installed")
+		return nil, errors.New("puredns not installed")
 	}
 
 	args := []string{"bruteforce", e.Opts.DNSWordlist, "-l", e.Paths.Roots()}
@@ -313,15 +308,8 @@ func labelUnder(host, root string) bool {
 	if host == root {
 		return true
 	}
-	if len(host) <= len(root)+1 {
-		return false
-	}
-	if !strings.HasSuffix(host, root) {
-		return false
-	}
-	// The character before the suffix must be the label separator, which is
-	// what stops "notexample.com" matching "example.com".
-	return host[len(host)-len(root)-1] == '.'
+	// Requiring the dot is what stops "notexample.com" matching "example.com".
+	return len(host) > len(root)+1 && strings.HasSuffix(host, "."+root)
 }
 
 // normaliseHosts extracts and canonicalises hostnames from free-form output.
@@ -358,8 +346,8 @@ func normaliseHosts(lines []string) []string {
 // not. So when the resolver is missing the stage fails rather than falling back.
 func Resolve(ctx context.Context, e *Env) error {
 	out := e.Paths.Resolved()
-	ipsPath := filepath.Join(e.Paths.ResolveDir, "ips.txt")
-	dnsPath := filepath.Join(e.Paths.ResolveDir, "dns.txt")
+	ipsPath := e.Paths.Addresses()
+	dnsPath := e.Paths.Records()
 
 	// The roots belong in the resolved set too, kept separate from the
 	// subdomain list rather than folded into it.
@@ -391,7 +379,7 @@ func Resolve(ctx context.Context, e *Env) error {
 		if err := writeResolveOutputs(out, ipsPath, dnsPath, nil, nil, nil); err != nil {
 			return err
 		}
-		return fmt.Errorf("dnsx is not installed, so no host could be verified")
+		return errors.New("dnsx is not installed, so no host could be verified")
 	}
 
 	// Scope-gate every candidate immediately before the resolver runs. The
@@ -415,7 +403,7 @@ func Resolve(ctx context.Context, e *Env) error {
 
 	logging.Info("resolving %d name(s) with dnsx", len(gated))
 
-	res, err := e.Tools.Run(ctx, "dnsx", "-silent", "-t", itoa(e.Opts.Threads), "-l", gatedPath)
+	res, err := e.Tools.Run(ctx, "dnsx", "-silent", "-t", strconv.Itoa(e.Opts.Threads), "-l", gatedPath)
 	if err != nil {
 		// Surfaced rather than discarded: a silent empty result looks
 		// identical to "no subdomains resolve".
@@ -430,6 +418,10 @@ func Resolve(ctx context.Context, e *Env) error {
 	var addresses []string
 	var records []string
 	if len(hosts) > 0 {
+		// The dump reads the host list from disk, so it has to be there first.
+		if err := util.WriteLines(out, hosts); err != nil {
+			return err
+		}
 		dnsRes, dnsErr := e.Tools.Run(ctx, "dnsx",
 			"-silent", "-nc", "-l", e.Paths.Resolved(),
 			"-a", "-aaaa", "-cname", "-ns", "-mx", "-resp", "-resp-only")
@@ -444,7 +436,7 @@ func Resolve(ctx context.Context, e *Env) error {
 		if len(addresses) == 0 {
 			logging.Debug("resolve: falling back to per-host address lookup")
 			for _, h := range hosts {
-				r, err := e.Tools.Run(ctx, "dnsx", "-silent", "-t", itoa(e.Opts.Threads),
+				r, err := e.Tools.Run(ctx, "dnsx", "-silent", "-t", strconv.Itoa(e.Opts.Threads),
 					"-a", "-aaaa", "-resp-only", h)
 				if err != nil {
 					continue
@@ -478,7 +470,7 @@ func Resolve(ctx context.Context, e *Env) error {
 	if len(hosts) == 0 {
 		logging.Warn("no names resolved to an address")
 		e.Run.SetNote("resolve", "zero hosts resolved")
-		return fmt.Errorf("no candidate name resolved to an address")
+		return errors.New("no candidate name resolved to an address")
 	}
 
 	logging.Ok("resolve: %d live host(s), %d address(es)", len(hosts), len(scopedIPs))
@@ -531,6 +523,99 @@ func extractAddresses(records []string) []string {
 	return out
 }
 
+// collectCRTSh queries certificate transparency logs for each root.
+//
+// crt.sh rate-limits hard and returns 502 under load, so a transport failure or a
+// 5xx is retried up to three times. A 4xx is a refusal and is never retried.
+func collectCRTSh(ctx context.Context, e *Env, roots []string) ([]string, error) {
+	const attempts = 3
+
+	var out []string
+	var lastErr error
+
+	for _, d := range roots {
+		if !e.Gate.Scope().Gate(d, "") {
+			continue
+		}
+
+		endpoint := "https://crt.sh/?output=json&q=%25." + d
+
+		var body []byte
+		for attempt := 1; attempt <= attempts; attempt++ {
+			resp, err := e.Gate.GetContext(ctx, endpoint)
+			if err != nil {
+				lastErr = err
+				if ctx.Err() != nil {
+					return out, ctx.Err()
+				}
+				continue
+			}
+			if resp.StatusCode >= 500 {
+				lastErr = fmt.Errorf("crt.sh returned %d", resp.StatusCode)
+				continue
+			}
+			if resp.StatusCode >= 400 {
+				// A 4xx is a refusal, not a transient failure.
+				lastErr = fmt.Errorf("crt.sh refused with %d", resp.StatusCode)
+				break
+			}
+			body = resp.Body
+			lastErr = nil
+			break
+		}
+		if body == nil {
+			logging.Debug("subs: crt.sh lookup failed for %s: %v", d, lastErr)
+			continue
+		}
+
+		out = append(out, parseCRTShNames(body)...)
+	}
+
+	return out, nil
+}
+
+// parseCRTShNames extracts the names from a crt.sh response.
+//
+// A single name_value field carries several comma-separated names, including
+// wildcard entries, so it is split before the wildcard prefix is stripped.
+func parseCRTShNames(body []byte) []string {
+	var entries []struct {
+		NameValue string `json:"name_value"`
+	}
+	if err := json.Unmarshal(body, &entries); err != nil {
+		return nil
+	}
+
+	var out []string
+	for _, e := range entries {
+		for _, name := range strings.Split(e.NameValue, ",") {
+			n := strings.TrimSpace(strings.ToLower(name))
+			n = strings.TrimPrefix(n, "*.")
+			if util.ValidDomain(n) {
+				out = append(out, n)
+			}
+		}
+	}
+	return out
+}
+
+// safeCollect runs a collector, converting a panic into an error.
+//
+// A collector is third-party output. One that crashes must cost its own results
+// and nothing else.
+func safeCollect(ctx context.Context,
+	fn func(context.Context, *Env, []string) ([]string, error),
+	e *Env, roots []string,
+) (lines []string, err error) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			lines = nil
+			err = fmt.Errorf("collector panicked: %v", rec)
+		}
+	}()
+	return fn(ctx, e, roots)
+}
+
 // runLines runs a tool and returns its non-blank stdout lines.
 func runLines(ctx context.Context, e *Env, name string, args ...string) ([]string, error) {
 	res, err := e.Tools.Run(ctx, name, args...)
@@ -562,6 +647,3 @@ func stripAllSpace(s string) string {
 		return r
 	}, s)
 }
-
-// itoa renders an int.
-func itoa(n int) string { return strconv.Itoa(n) }

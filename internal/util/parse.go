@@ -10,15 +10,9 @@ package util
 import (
 	"net/netip"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
-
-// SplitScheme returns the scheme of raw, or "" when it carries none.
-func SplitScheme(raw string) string {
-	if i := strings.Index(raw, "://"); i >= 0 {
-		return raw[:i]
-	}
-	return ""
-}
 
 // ReduceAuthority strips the scheme, path, query, fragment and userinfo from
 // raw, leaving host[:port].
@@ -54,6 +48,14 @@ func ReduceAuthority(raw string) string {
 // be determined, rather than returning an empty string, so a caller cannot
 // mistake "no host" for "the host is empty".
 func URLHost(raw string) (string, bool) {
+	host, ok := urlHost(raw)
+	if !ok || hasUnsafeHostByte(host) {
+		return "", false
+	}
+	return host, true
+}
+
+func urlHost(raw string) (string, bool) {
 	if raw == "" {
 		return "", false
 	}
@@ -93,6 +95,21 @@ func URLHost(raw string) (string, bool) {
 		return "", false
 	}
 	return auth, true
+}
+
+// hasUnsafeHostByte reports whether s holds a control character, a space or
+// invalid UTF-8. No real host has one, and a caller that logs, stores or dials the
+// result should never be handed one.
+func hasUnsafeHostByte(s string) bool {
+	if !utf8.ValidString(s) {
+		return true
+	}
+	for _, r := range s {
+		if r <= ' ' || r == 0x7f || unicode.IsControl(r) {
+			return true
+		}
+	}
+	return false
 }
 
 // URLPort returns the explicit port in raw, or "" when it carries none.
@@ -205,15 +222,6 @@ func JoinHostPort(host, port string) string {
 	return host + ":" + port
 }
 
-// IsIPv4 reports whether s is a dotted-quad IPv4 literal.
-func IsIPv4(s string) bool {
-	a, err := netip.ParseAddr(s)
-	if err != nil {
-		return false
-	}
-	return a.Is4()
-}
-
 // IsIPv6 reports whether s is an IPv6 literal.
 //
 // A mapped address such as "::ffff:192.0.2.5" counts as IPv6, because that is
@@ -238,7 +246,7 @@ func ValidPort(s string) bool {
 		return false
 	}
 	n := 0
-	for i := 0; i < len(s); i++ {
+	for i := range len(s) {
 		if s[i] < '0' || s[i] > '9' {
 			return false
 		}
@@ -310,7 +318,7 @@ func allDigits(s string) bool {
 	if s == "" {
 		return false
 	}
-	for i := 0; i < len(s); i++ {
+	for i := range len(s) {
 		if s[i] < '0' || s[i] > '9' {
 			return false
 		}
@@ -327,7 +335,7 @@ func validLabel(l string) bool {
 	if l[0] == '-' || l[len(l)-1] == '-' {
 		return false
 	}
-	for i := 0; i < len(l); i++ {
+	for i := range len(l) {
 		c := l[i]
 		switch {
 		case c >= 'a' && c <= 'z',
@@ -341,4 +349,17 @@ func validLabel(l string) bool {
 		}
 	}
 	return true
+}
+
+// Truncate shortens s to at most n bytes, never splitting a character, and appends
+// "..." when it cut. A negative n is treated as zero.
+func Truncate(s string, n int) string {
+	n = max(n, 0)
+	if len(s) <= n {
+		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n] + "..."
 }

@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/BhargavPalan/Fal-X/internal/logging"
 )
 
 // parse fails the test on an unexpected parse error.
@@ -18,12 +20,16 @@ func parse(t *testing.T, args ...string) *Options {
 	return opts
 }
 
-// mustRefuse requires Precheck to refuse with a specific kind.
-func mustRefuse(t *testing.T, kind Refusal, args ...string) *Options {
+// mustRefuseScope requires Precheck to refuse on authorization or scope grounds.
+func mustRefuseScope(t *testing.T, args ...string) *Options {
 	t.Helper()
 	opts := parse(t, args...)
-	if err := opts.Precheck(); err == nil {
-		t.Fatalf("Precheck(%q) = nil, want %s", args, kind)
+	err := opts.Precheck()
+	if err == nil {
+		t.Fatalf("Precheck(%q) = nil, want a scope refusal", args)
+	}
+	if got := logging.ExitFor(err); got != logging.StatusScope {
+		t.Fatalf("Precheck(%q) refused with status %d, want %d (%v)", args, got, logging.StatusScope, err)
 	}
 	return opts
 }
@@ -69,8 +75,8 @@ func TestExactlyOneTargetIsRequired(t *testing.T) {
 		if err == nil {
 			t.Fatal("Precheck accepted a run with no target")
 		}
-		if got := RefusalKind(err); got != RefuseUsage {
-			t.Errorf("refusal kind = %v, want %v", got, RefuseUsage)
+		if got := logging.ExitFor(err); got != logging.StatusUsage {
+			t.Errorf("exit status = %v, want %v", got, logging.StatusUsage)
 		}
 	})
 
@@ -236,7 +242,7 @@ func TestMissingAllowlistFailsClosed(t *testing.T) {
 	// carried out. Refusing is the honest response, because running without the
 	// boundary the operator asked for is the one outcome nobody intended.
 	t.Run("absent but requested", func(t *testing.T) {
-		mustRefuse(t, RefuseScope, "-d", "example.com",
+		mustRefuseScope(t, "-d", "example.com",
 			"--scope", filepath.Join(dir, "nope.txt"))
 	})
 
@@ -245,7 +251,7 @@ func TestMissingAllowlistFailsClosed(t *testing.T) {
 		if err := os.WriteFile(p, nil, 0o600); err != nil {
 			t.Fatal(err)
 		}
-		mustRefuse(t, RefuseScope, "-d", "example.com", "--scope", p)
+		mustRefuseScope(t, "-d", "example.com", "--scope", p)
 	})
 
 	t.Run("comments only", func(t *testing.T) {
@@ -253,7 +259,7 @@ func TestMissingAllowlistFailsClosed(t *testing.T) {
 		if err := os.WriteFile(p, []byte("# nothing here\n# still nothing\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		mustRefuse(t, RefuseScope, "-d", "example.com", "--scope", p)
+		mustRefuseScope(t, "-d", "example.com", "--scope", p)
 	})
 }
 
@@ -319,8 +325,8 @@ func TestWhyDeniedUsesTheConfiguredAllowlist(t *testing.T) {
 		"--why-denied", "example.com")
 	if err := opts.Precheck(); err == nil {
 		t.Fatal("Precheck accepted --why-denied with an unreadable allowlist")
-	} else if got := RefusalKind(err); got != RefuseScope {
-		t.Errorf("refusal kind = %v, want %v", got, RefuseScope)
+	} else if got := logging.ExitFor(err); got != logging.StatusScope {
+		t.Errorf("exit status = %v, want %v", got, logging.StatusScope)
 	}
 }
 
@@ -347,8 +353,8 @@ func TestWhyDeniedWithoutAnAllowlist(t *testing.T) {
 func TestOutOfScopeTargetIsRefusedBeforeAnyRequest(t *testing.T) {
 	sf := scopeFile(t)
 
-	mustRefuse(t, RefuseScope, "-d", "attacker.test", "--scope", sf)
-	mustRefuse(t, RefuseScope, "-ip", "192.0.4.5", "--scope", sf)
+	mustRefuseScope(t, "-d", "attacker.test", "--scope", sf)
+	mustRefuseScope(t, "-ip", "192.0.4.5", "--scope", sf)
 
 	if err := parse(t, "-d", "example.com", "--scope", sf).Precheck(); err != nil {
 		t.Errorf("Precheck for an in-scope target = %v, want nil", err)
@@ -362,7 +368,7 @@ func TestPrivateRangesNeedOptIn(t *testing.T) {
 
 	// A private address is refused on an active run, and not on a dry run,
 	// because a dry run contacts nothing.
-	mustRefuse(t, RefuseScope, "-ip", "10.1.2.3", "--scope", p)
+	mustRefuseScope(t, "-ip", "10.1.2.3", "--scope", p)
 	if err := parse(t, "-ip", "10.1.2.3", "--scope", p, "--dry-run").Precheck(); err != nil {
 		t.Errorf("dry run refused a private target: %v", err)
 	}
@@ -384,7 +390,7 @@ func TestPrivateRangesNeedOptIn(t *testing.T) {
 func TestBareWildcardNeedsAllowAny(t *testing.T) {
 	p := scopeWith(t, "*\n", "")
 
-	mustRefuse(t, RefuseScope, "-d", "anything.test", "--scope", p)
+	mustRefuseScope(t, "-d", "anything.test", "--scope", p)
 
 	opts := parse(t, "-d", "anything.test", "--scope", p, "--allow-any", "--yes")
 	if err := opts.Precheck(); err != nil {
@@ -431,8 +437,8 @@ func TestStageSelection(t *testing.T) {
 		if err == nil {
 			t.Fatal("Parse accepted an unknown stage")
 		}
-		if got := RefusalKind(err); got != RefuseUsage {
-			t.Errorf("refusal kind = %v, want %v", got, RefuseUsage)
+		if got := logging.ExitFor(err); got != logging.StatusUsage {
+			t.Errorf("exit status = %v, want %v", got, logging.StatusUsage)
 		}
 	})
 
@@ -592,8 +598,8 @@ func TestExitStatusContract(t *testing.T) {
 			if err == nil {
 				t.Fatalf("no error for %q, want status %d", tc.args, tc.want)
 			}
-			if got := StatusFor(err); got != tc.want {
-				t.Errorf("StatusFor = %d, want %d (err = %v)", got, tc.want, err)
+			if got := logging.ExitFor(err); got != tc.want {
+				t.Errorf("ExitFor = %d, want %d (err = %v)", got, tc.want, err)
 			}
 		})
 	}
@@ -612,8 +618,8 @@ func TestUnknownFlagIsRejected(t *testing.T) {
 			t.Errorf("Parse accepted a mistyped flag %q", args)
 			continue
 		}
-		if got := RefusalKind(err); got != RefuseUsage {
-			t.Errorf("RefusalKind(%q) = %v, want %v", args, got, RefuseUsage)
+		if got := logging.ExitFor(err); got != logging.StatusUsage {
+			t.Errorf("ExitFor(%q) = %v, want %v", args, got, logging.StatusUsage)
 		}
 	}
 }

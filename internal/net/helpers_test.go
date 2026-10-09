@@ -66,3 +66,14 @@ func redirectingServer(t *testing.T, target string, contacted *atomic.Int64) *co
 
 	return cs
 }
+
+// newLocalClient returns a client with no timeout and no redirect following, for
+// tests against a local server. A zero timeout would hang the suite rather than
+// fail it.
+func newLocalClient() *http.Client {
+	return &http.Client{
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+}

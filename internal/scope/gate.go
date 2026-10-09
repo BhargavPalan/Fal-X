@@ -310,6 +310,14 @@ func (s *Scope) ipAllowed(host string) bool {
 }
 
 // specialBlocked denies special ranges unless allowPrivate is set.
+//
+// It compares host case-sensitively ("localhost", not "LocalHost" or "localhost."),
+// and that is safe only because it has exactly one caller, Gate, which reaches it
+// after the host has been lowercased and stripped of a trailing dot. Do not add a
+// second caller, and do not call it with a host that has not been through that
+// normalisation: a spelling of loopback or a metadata name that skipped it would
+// slip past this check. If a second path ever needs this decision, move the
+// normalisation inside this function first.
 func (s *Scope) specialBlocked(host string) (string, bool) {
 	if s.allowPrivate {
 		return "", false
@@ -357,15 +365,6 @@ func matchSubdomain(host, apex string) bool {
 	return host[len(host)-len(apex)-1] == '.'
 }
 
-// HostAllowed reports whether a bare hostname is in scope.
-func (s *Scope) HostAllowed(host string) bool {
-	return s.domainAllowed(host, "")
-}
-
-func (s *Scope) domainAllowed(host, port string) bool {
-	return s.Explain(host, port).Allowed
-}
-
 // URLAllowed reports whether the host inside a URL is in scope.
 func (s *Scope) URLAllowed(rawURL string) bool {
 	host, port := hostPortFromURL(rawURL)
@@ -373,15 +372,4 @@ func (s *Scope) URLAllowed(rawURL string) bool {
 		return false
 	}
 	return s.Gate(host, port)
-}
-
-// SummaryLine renders the loaded scope for --dry-run output.
-func (s *Scope) SummaryLine() string {
-	sum := s.Summary()
-	if !sum.Loaded {
-		return "FAILED CLOSED (allowlist unusable)"
-	}
-	return fmt.Sprintf("apex=%d wildcard=%d host:port=%d ip=%d cidr=%d deny=%d private=%v any=%v",
-		sum.Apex, sum.Wildcard, sum.HostPort, sum.IPExact, sum.CIDR,
-		sum.DenyTotal, sum.AllowPrivate, sum.AllowAny)
 }

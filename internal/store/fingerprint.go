@@ -3,7 +3,9 @@ package store
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
+	"errors"
 	"fmt"
 )
 
@@ -63,17 +65,12 @@ func schemaFingerprint(ctx context.Context, d *DB) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-// CaptureFingerprint records the current schema shape as the new baseline.
+// CaptureFingerprint records the schema shape as it is now as the new baseline.
 //
-// It is the escape hatch for the schema-drift report, and it is deliberately
-// explicit: accepting an unexplained change to the live schema is a decision
-// somebody has to make out loud.
+// It is the escape hatch for the schema-drift report, and deliberately explicit:
+// accepting an unexplained change to the live schema is a decision somebody has to
+// make out loud.
 func (d *DB) CaptureFingerprint(ctx context.Context) error {
-	return d.captureFingerprint(ctx)
-}
-
-// captureFingerprint records the fingerprint the schema has right now.
-func (d *DB) captureFingerprint(ctx context.Context) error {
 	fp, err := schemaFingerprint(ctx, d)
 	if err != nil {
 		return err
@@ -97,7 +94,7 @@ func (d *DB) recordedFingerprint(ctx context.Context) (string, error) {
 	switch {
 	case err == nil:
 		return fp, nil
-	case isNoRows(err):
+	case errors.Is(err, sql.ErrNoRows):
 		// Absent means the ledger predates the fingerprint table, which is not
 		// drift. It is a missing measurement, and the next apply writes one.
 		return "", nil

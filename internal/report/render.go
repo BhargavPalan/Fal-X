@@ -7,6 +7,8 @@ import (
 	"slices"
 	"sort"
 	"strings"
+
+	"github.com/BhargavPalan/Fal-X/internal/util"
 )
 
 // Format names an output format.
@@ -76,7 +78,7 @@ func RenderMarkdown(m *Model) []byte {
 
 	w("# Fal-X report: %s\n\n", cell(m.Target))
 	w("| | |\n|---|---|\n")
-	w("| Run | `%s` |\n", m.RunID)
+	w("| Run | %s |\n", cell(m.RunID))
 	w("| Started | %s |\n", cell(m.StartedAt))
 	w("| Profile | %s |\n", cell(orDash(m.Profile)))
 	w("| Elapsed | %ds |\n", m.ElapsedSeconds)
@@ -84,7 +86,7 @@ func RenderMarkdown(m *Model) []byte {
 		w("| Mode | **dry run: nothing was contacted** |\n")
 	}
 	if m.ScopeDigest != "" {
-		w("| Scope fingerprint | `%s` |\n", m.ScopeDigest)
+		w("| Scope fingerprint | %s |\n", cell(m.ScopeDigest))
 	}
 	w("\n")
 
@@ -138,7 +140,7 @@ func writeSummary(b *bytes.Buffer, m *Model) {
 func writeStages(b *bytes.Buffer, m *Model) {
 	fmt.Fprintf(b, "## Stages\n\n| Stage | Status | Duration | Note |\n|---|---|---|---|\n")
 	for _, s := range m.Stages {
-		fmt.Fprintf(b, "| %s | %s | %ds | %s |\n", s.Name, s.Status, s.DurationSeconds, cell(s.Note))
+		fmt.Fprintf(b, "| %s | %s | %ds | %s |\n", cell(s.Name), cell(s.Status), s.DurationSeconds, cell(s.Note))
 	}
 	fmt.Fprintln(b)
 }
@@ -160,14 +162,14 @@ func writeFindings(b *bytes.Buffer, m *Model) {
 				fmt.Fprintln(b)
 			}
 			cur = f.Severity
-			fmt.Fprintf(b, "### %s\n\n", strings.ToUpper(cur))
+			fmt.Fprintf(b, "### %s\n\n", cell(strings.ToUpper(cur)))
 		}
 		id := f.Template
 		if f.Matcher != "" {
 			id += ":" + f.Matcher
 		}
 		if id == "" {
-			fmt.Fprintf(b, "- `%s`\n", f.Raw)
+			fmt.Fprintf(b, "- %s\n", cell(f.Raw))
 			continue
 		}
 		fmt.Fprintf(b, "- **%s** (%s) %s", cell(id), cell(f.Protocol), cell(f.Target))
@@ -220,27 +222,23 @@ func writeList(b *bytes.Buffer, m *Model, title, stage string, a Artifact[string
 // stageState explains in words why an artifact is missing, from what the run
 // recorded about the stage that should have produced it.
 func stageState(m *Model, stage string) string {
+	// The status and note come from the run's stages.json, which can be an
+	// untrusted bundle, so they are escaped here. Every caller prints this inside
+	// prose or a table cell, so escaping once at the source covers them all.
 	s, ok := m.StageByName(stage)
 	if !ok {
-		return "the " + stage + " stage is not in this run"
+		return "the " + cell(stage) + " stage is not in this run"
 	}
-	out := "the " + stage + " stage " + s.Status
+	out := "the " + cell(stage) + " stage " + cell(s.Status)
 	if s.Note != "" {
-		out += ": " + s.Note
+		out += ": " + cell(s.Note)
 	}
 	return out
 }
 
 // cell makes untrusted text safe inside a Markdown table cell or list item. Page
 // titles and banners come from the scanned host, so they are data, not markup.
-func cell(s string) string {
-	s = strings.ReplaceAll(s, "\r", " ")
-	s = strings.ReplaceAll(s, "\n", " ")
-	s = strings.ReplaceAll(s, "|", `\|`)
-	s = strings.ReplaceAll(s, "<", "&lt;")
-	s = strings.ReplaceAll(s, ">", "&gt;")
-	return s
-}
+func cell(s string) string { return util.MarkdownText(s) }
 
 func orDash(s string) string {
 	if s == "" {

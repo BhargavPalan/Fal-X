@@ -1,6 +1,7 @@
 package scope
 
 import (
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
@@ -52,116 +53,11 @@ func (f *fixtures) load(t *testing.T, allowPrivate, allowAny bool) *Scope {
 	return s
 }
 
-// ---------------------------------------------------------------------------
-// Canonicalisation
-// ---------------------------------------------------------------------------
-
-func TestNormHost(t *testing.T) {
-	tests := []struct {
-		in   string
-		want string
-		ok   bool
-	}{
-		{"Example.COM", "example.com", true},
-		{"example.com.", "example.com", true},
-		{"https://example.com/a/b", "example.com", true},
-		{"example.com:8443", "example.com", true},
-		{"HTTP://API.Example.com/x", "api.example.com", true},
-		{"user:pw@example.com/p", "example.com", true},
-		{"[2001:db8::1]:443", "2001:db8::1", true},
-		{"::1", "::1", true},
-		{"2001:db8::1", "2001:db8::1", true},
-		{"2001:DB8::1", "2001:db8::1", true},
-		{"example.com#frag", "example.com", true},
-		{"", "", false},
-		{"   ", "", false},
-		{"exa mple.com", "", false},
-		// A trailing newline comes from reading a file and is tolerated; a
-		// newline in the middle is the injection shape and is not.
-		{"example.com\n", "example.com", true},
-		{"example.com\r\n", "example.com", true},
-		{"exam\nple.com", "", false},
-		{"exam\rple.com", "", false},
+func TestIsSpecialAddr(t *testing.T) {
+	isSpecial := func(s string) bool {
+		a, err := netip.ParseAddr(s)
+		return err == nil && IsSpecialAddr(a)
 	}
-	for _, tc := range tests {
-		got, ok := NormHost(tc.in)
-		if ok != tc.ok {
-			t.Errorf("NormHost(%q) ok = %v, want %v (got %q)", tc.in, ok, tc.ok, got)
-			continue
-		}
-		if ok && got != tc.want {
-			t.Errorf("NormHost(%q) = %q, want %q", tc.in, got, tc.want)
-		}
-	}
-}
-
-func TestIsIPv4(t *testing.T) {
-	valid := []string{"0.0.0.0", "192.0.2.1", "255.255.255.255", "10.1.2.3", "172.16.0.1"}
-	for _, s := range valid {
-		if !IsIPv4(s) {
-			t.Errorf("IsIPv4(%q) = false, want true", s)
-		}
-	}
-	invalid := []string{
-		"192.0.2", "192.0.2.1.1", "192.0.2.300", "192.0.2.-1",
-		"192.000.2.1", "010.1.1.1", "example.com", "", "192.0.2.1 ",
-		"1.2.3.4/24",
-	}
-	for _, s := range invalid {
-		if IsIPv4(s) {
-			t.Errorf("IsIPv4(%q) = true, want false", s)
-		}
-	}
-}
-
-func TestIsIPv6(t *testing.T) {
-	valid := []string{
-		"::1", "::", "2001:db8::1", "fe80::1", "fd00::1",
-		"2001:db8:0:0:0:0:0:1", "::ffff:127.0.0.1", "::ffff:192.0.2.1",
-	}
-	for _, s := range valid {
-		if !IsIPv6(s) {
-			t.Errorf("IsIPv6(%q) = false, want true", s)
-		}
-	}
-	invalid := []string{
-		"example.com", "192.0.2.1", "",
-		"2001::db8::1",     // two compressions
-		"20011:db8::1",     // oversized group
-		"2001:db8:::1",     // stray colon
-		"gggg::1",          // not hex
-		"::ffff:999.1.1.1", // embedded IPv4 out of range
-	}
-	for _, s := range invalid {
-		if IsIPv6(s) {
-			t.Errorf("IsIPv6(%q) = true, want false", s)
-		}
-	}
-}
-
-func TestIsIPAndIsCIDR(t *testing.T) {
-	if !IsIP("192.0.2.1") || !IsIP("2001:db8::1") {
-		t.Error("IsIP rejected a valid literal")
-	}
-	if IsIP("example.com") || IsIP("192.0.2.0/24") || IsIP("") {
-		t.Error("IsIP accepted something it should not")
-	}
-
-	if !IsCIDR("192.0.2.0/24") || !IsCIDR("0.0.0.0/0") || !IsCIDR("2001:db8::/32") {
-		t.Error("IsCIDR rejected a valid prefix")
-	}
-	for _, s := range []string{"192.0.2.0/33", "2001:db8::/129", "192.0.2.0", "example.com/24", "192.0.2.0/", "/24"} {
-		if IsCIDR(s) {
-			t.Errorf("IsCIDR(%q) = true, want false", s)
-		}
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Special ranges
-// ---------------------------------------------------------------------------
-
-func TestIsSpecialIP(t *testing.T) {
 	special := []string{
 		"127.0.0.1", "10.1.2.3", "172.16.0.1", "172.31.255.255",
 		"192.168.1.1", "169.254.1.1", "169.254.169.254",
@@ -171,8 +67,8 @@ func TestIsSpecialIP(t *testing.T) {
 		"ff02::1", "::ffff:127.0.0.1", "::ffff:10.0.0.1",
 	}
 	for _, s := range special {
-		if !IsSpecialIP(s) {
-			t.Errorf("IsSpecialIP(%q) = false, want true", s)
+		if !isSpecial(s) {
+			t.Errorf("IsSpecialAddr(%q) = false, want true", s)
 		}
 	}
 
@@ -184,59 +80,11 @@ func TestIsSpecialIP(t *testing.T) {
 		"2001:db8::1", "::ffff:192.0.2.1", "example.com",
 	}
 	for _, s := range public {
-		if IsSpecialIP(s) {
-			t.Errorf("IsSpecialIP(%q) = true, want false", s)
+		if isSpecial(s) {
+			t.Errorf("IsSpecialAddr(%q) = true, want false", s)
 		}
 	}
 }
-
-// ---------------------------------------------------------------------------
-// CIDR arithmetic
-// ---------------------------------------------------------------------------
-
-func TestIPv4InCIDR(t *testing.T) {
-	tests := []struct {
-		ip, cidr string
-		want     bool
-	}{
-		{"192.0.2.5", "192.0.2.0/24", true},
-		{"192.0.3.5", "192.0.2.0/24", false},
-		{"192.0.2.7", "192.0.2.7/32", true},
-		{"192.0.2.8", "192.0.2.7/32", false},
-		{"203.0.114.1", "0.0.0.0/0", true},
-		{"10.1.2.3", "10.0.0.0/8", true},
-		{"11.1.2.3", "10.0.0.0/8", false},
-		{"192.0.3.1", "192.0.2.0/23", true},  // unaligned /23
-		{"192.0.4.1", "192.0.2.0/23", false}, // next block excluded
-		{"192.0.2.0", "192.0.2.0/24", true},  // network address
-		{"192.0.3.255", "192.0.2.0/24", false},
-	}
-	for _, tc := range tests {
-		if got := IPv4InCIDR(tc.ip, tc.cidr); got != tc.want {
-			t.Errorf("IPv4InCIDR(%q, %q) = %v, want %v", tc.ip, tc.cidr, got, tc.want)
-		}
-	}
-
-	if IPv4InCIDR("2001:db8::1", "2001:db8::/32") {
-		t.Error("IPv4InCIDR accepted an IPv6 address")
-	}
-}
-
-func TestIPInCIDR(t *testing.T) {
-	if !IPInCIDR("2001:db8::5", "2001:db8::/32") {
-		t.Error("IPInCIDR rejected an IPv6 address inside the prefix")
-	}
-	if IPInCIDR("2001:db9::5", "2001:db8::/32") {
-		t.Error("IPInCIDR accepted an IPv6 address outside the prefix")
-	}
-	if !IPInCIDR("192.0.2.9", "192.0.2.0/24") {
-		t.Error("IPInCIDR rejected an IPv4 address inside the prefix")
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Fail-closed behaviour
-// ---------------------------------------------------------------------------
 
 func TestLoadFailsClosed(t *testing.T) {
 	t.Run("absent allowlist", func(t *testing.T) {
@@ -295,10 +143,6 @@ func TestLoadFailsClosed(t *testing.T) {
 		}
 	})
 }
-
-// ---------------------------------------------------------------------------
-// Domain decisions
-// ---------------------------------------------------------------------------
 
 func TestDomainGate(t *testing.T) {
 	f := newFixtures(t, `# approved assets
@@ -417,10 +261,6 @@ func TestURLAllowed(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// Wildcard semantics, isolated so an apex rule cannot mask the result
-// ---------------------------------------------------------------------------
-
 func TestWildcardDoesNotMatchApex(t *testing.T) {
 	f := newFixtures(t, "*.only.test\n", "")
 	s := f.load(t, false, false)
@@ -452,10 +292,6 @@ func TestApexMatchesSubdomains(t *testing.T) {
 		}
 	}
 }
-
-// ---------------------------------------------------------------------------
-// Port-scoped entries
-// ---------------------------------------------------------------------------
 
 func TestPortPinnedEntries(t *testing.T) {
 	f := newFixtures(t, "pinned.test:8443\nfree.test\n", "")
@@ -504,10 +340,6 @@ func TestHostPortFormsAccepted(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// Private-range gating
-// ---------------------------------------------------------------------------
-
 func TestPrivateRangeGating(t *testing.T) {
 	allow := "10.0.0.0/8\n192.168.0.0/16\nlab.example.com\nlocalhost\n127.0.0.1\n"
 
@@ -543,10 +375,6 @@ func TestPrivateRangeGating(t *testing.T) {
 	})
 }
 
-// ---------------------------------------------------------------------------
-// allow-any
-// ---------------------------------------------------------------------------
-
 func TestAllowAny(t *testing.T) {
 	allow := "example.com\n"
 	deny := "admin.example.com\n"
@@ -577,10 +405,6 @@ func TestAllowAny(t *testing.T) {
 	})
 }
 
-// ---------------------------------------------------------------------------
-// Fingerprint
-// ---------------------------------------------------------------------------
-
 func TestFingerprint(t *testing.T) {
 	f := newFixtures(t, "example.com\n*.wild.test\n192.0.2.0/24\n", "admin.example.com\n")
 
@@ -601,10 +425,6 @@ func TestFingerprint(t *testing.T) {
 		t.Error("a different scope produced the same fingerprint")
 	}
 }
-
-// ---------------------------------------------------------------------------
-// Entry parsing
-// ---------------------------------------------------------------------------
 
 func TestEntryNormalisation(t *testing.T) {
 	tests := []struct {
@@ -677,10 +497,6 @@ func TestEntryRejectsInvalidCharacters(t *testing.T) {
 		t.Error("a rejected entry must not populate a rule")
 	}
 }
-
-// ---------------------------------------------------------------------------
-// Diagnostics
-// ---------------------------------------------------------------------------
 
 func TestExplain(t *testing.T) {
 	f := newFixtures(t, "example.com\n", "admin.example.com\n")

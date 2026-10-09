@@ -51,7 +51,7 @@ type Stage struct {
 	// order is the stage's position in the pipeline. It is not serialised: it
 	// exists so the manifest can be written in pipeline order rather than in the
 	// order a concurrent pair happened to finish.
-	order int `json:"-"`
+	order int
 
 	Status          Status `json:"status"`
 	ExitCode        int    `json:"exit_code"`
@@ -61,7 +61,6 @@ type Stage struct {
 	Note            string `json:"note"`
 }
 
-// stagesDoc is the stages.json document.
 type stagesDoc struct {
 	SchemaVersion        int     `json:"schema_version"`
 	RunID                string  `json:"run_id"`
@@ -75,14 +74,16 @@ type stagesDoc struct {
 // It is exported so a consumer (the report renderer, and later the database
 // importer) reads the same structure the run writes rather than redeclaring it.
 type Manifest struct {
-	RunID     string   `json:"run_id"`
-	Target    string   `json:"target"`
-	Label     string   `json:"label"`
-	Stamp     string   `json:"stamp"`
-	StartedAt string   `json:"started_at"`
-	EndedAt   string   `json:"ended_at,omitempty"`
-	Profile   string   `json:"profile,omitempty"`
-	Stages    []string `json:"stages,omitempty"`
+	RunID     string `json:"run_id"`
+	Target    string `json:"target"`
+	Label     string `json:"label"`
+	Stamp     string `json:"stamp"`
+	StartedAt string `json:"started_at"`
+	EndedAt   string `json:"ended_at,omitempty"`
+	Profile   string `json:"profile,omitempty"`
+	// Mode is domain, ip or asn: which kind of target the run started from.
+	Mode   string   `json:"mode,omitempty"`
+	Stages []string `json:"stages,omitempty"`
 
 	// The exact allowlist and denylist the run was authorised under. A result
 	// is only meaningful alongside the authorization that permitted it.
@@ -104,12 +105,14 @@ type Manifest struct {
 // SchemaVersion promises. Stages come back in pipeline order, the order
 // stages.json was written in.
 func Load(dir string) (*Manifest, []Stage, error) {
+	// The run directory can be an untrusted bundle, so a manifest that is a symlink
+	// pointing outside it is refused, not followed.
 	var m Manifest
-	if err := readJSON(filepath.Join(dir, "run.json"), &m); err != nil {
+	if err := readManifest(dir, "run.json", &m); err != nil {
 		return nil, nil, err
 	}
 	var doc stagesDoc
-	if err := readJSON(filepath.Join(dir, "stages.json"), &doc); err != nil {
+	if err := readManifest(dir, "stages.json", &doc); err != nil {
 		return nil, nil, err
 	}
 	if doc.SchemaVersion != SchemaVersion {
@@ -117,6 +120,16 @@ func Load(dir string) (*Manifest, []Stage, error) {
 			dir, doc.SchemaVersion, SchemaVersion)
 	}
 	return &m, doc.Stages, nil
+}
+
+// readManifest reads one manifest file from a run directory, refusing a path that
+// resolves outside it.
+func readManifest(dir, name string, v any) error {
+	path, err := util.ResolveWithin(dir, name)
+	if err != nil {
+		return fmt.Errorf("run: %w", err)
+	}
+	return readJSON(path, v)
 }
 
 // readJSON decodes one manifest file into v.
@@ -165,6 +178,8 @@ type Run struct {
 	dryRun       bool
 	allowPrivate bool
 	allowAny     bool
+	mode         string
+	scopeFinger  string
 	toolVersions map[string]string
 }
 
@@ -220,6 +235,29 @@ func (r *Run) SetScope(allowlist, denylist string) {
 	defer r.mu.Unlock()
 	r.allowlist = allowlist
 	r.denylist = denylist
+}
+
+// SetMode records whether the run started from a domain, an address range or an
+// autonomous system.
+func (r *Run) SetMode(m string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.mode = m
+}
+
+// SetAllowAny records the bare-wildcard override.
+func (r *Run) SetAllowAny(v bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.allowAny = v
+}
+
+// SetScopeFingerprint records the digest of the parsed scope rules, which ties a
+// result to the exact authorization it ran under.
+func (r *Run) SetScopeFingerprint(f string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.scopeFinger = f
 }
 
 // SetDryRun records that the run contacts nothing.
@@ -476,6 +514,8 @@ func (r *Run) WriteManifest() error {
 		Stamp:          r.Stamp,
 		StartedAt:      util.ISOStamp(r.started),
 		Profile:        r.profile,
+		Mode:           r.mode,
+		ScopeFinger:    r.scopeFinger,
 		ScopeAllowlist: r.allowlist,
 		ScopeDenylist:  r.denylist,
 		DryRun:         r.dryRun,
@@ -486,6 +526,9 @@ func (r *Run) WriteManifest() error {
 	}
 	if len(r.toolVersions) == 0 {
 		m.ToolVersions = nil
+	}
+	if !r.ended.IsZero() {
+		m.EndedAt = util.ISOStamp(r.ended)
 	}
 	r.mu.Unlock()
 

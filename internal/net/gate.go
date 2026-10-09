@@ -1,44 +1,44 @@
-// Package net is the single network authorization choke point.
+// Package net is the Go-side path to scan targets, and the dry-run switch.
 //
-// No outbound request is issued without passing through Gate.RequireAllowed.
-// Stages never construct an HTTP client directly; they call the helpers here,
-// and every helper gates first.
+// Gate.GetContext is the only place this program's own code issues an HTTP request
+// to a target. It authorizes the URL before sending and again for every redirect
+// hop, which it follows by hand. Traffic from the external tools (naabu, httpx,
+// nuclei and the rest) is authorized differently: each stage filters the list it
+// hands a tool through Gate.Scope().Gate before launching it, so the tool never
+// sees a target the scope refuses.
 //
-// This package exists so the authorization decision cannot drift away from the
-// request. Adding a new network call means adding a helper here, which makes
-// the gate unavoidable.
+// Both rest on one decision, scope.Scope.Gate. This package adds the dry-run
+// switch and a single log line per refused target.
+//
+// The other outbound HTTP in the program is not here and is deliberately ungated:
+// internal/intel fetches the NVD, CISA KEV and EPSS feeds, and internal/wordlists
+// fetches its lists. Those URLs are fixed in source and are never derived from a
+// scan target, so there is nothing an operator's input could redirect. Anything
+// whose URL *can* come from a target belongs in this package.
 package net
 
 import (
 	"errors"
 	"fmt"
 	"sync"
-	"sync/atomic"
 
 	"github.com/BhargavPalan/Fal-X/internal/logging"
 	"github.com/BhargavPalan/Fal-X/internal/scope"
 )
 
-// Gate applies the scope decision and records what it decided.
-//
-// One Gate is shared by every stage of a run, so the counters describe the run
-// as a whole rather than one stage.
+// Gate applies the scope decision for one run. One Gate is shared by every stage.
 type Gate struct {
 	sc *scope.Scope
 
 	dryRun bool
 
-	// The HTTP client every helper in this package uses. Set by SetHTTPClient.
-	// A nil client means the package default.
+	// client is the HTTP client GetContext uses; nil means the package default.
+	// Tests replace it with SetHTTPClient.
 	client HTTPDoer
 
-	allowed  atomic.Int64
-	denied   atomic.Int64
-	redirect atomic.Int64
-
 	// reported deduplicates denial messages. A denylist that rejects 40,000
-	// URLs must not produce 40,000 log lines, and it must not grow the seen
-	// set without bound either.
+	// URLs must not produce 40,000 log lines, and the seen set must not grow
+	// without bound either.
 	reportMu   sync.Mutex
 	reported   map[string]struct{}
 	reportedN  int
@@ -53,38 +53,20 @@ func New(sc *scope.Scope) *Gate {
 // Scope returns the scope this gate decides against.
 func (g *Gate) Scope() *scope.Scope { return g.sc }
 
-// SetDryRun closes the network without changing any other decision path.
-//
-// In dry run the gate is bypassed rather than evaluated, and the caller is
-// responsible for not issuing the request. That keeps --dry-run the same code
-// path with the network closed instead of a separate implementation that
-// quietly skips authorization.
+// SetDryRun makes RequireAllowed pass everything without evaluating it. The caller
+// is responsible for not issuing the request, which keeps --dry-run the same code
+// path as a real run with the network closed, not a separate implementation.
 func (g *Gate) SetDryRun(v bool) { g.dryRun = v }
 
-// SetHTTPClient replaces the client every helper uses.
+// SetHTTPClient replaces the client GetContext uses, so a test can point it at a
+// local server.
 func (g *Gate) SetHTTPClient(c HTTPDoer) { g.client = c }
 
-// Counts returns how many targets were permitted and refused.
-//
-// The denied count is what makes a run honest: a scan that suppressed 40,000
-// out-of-scope requests looks identical to one that found nothing without it.
-func (g *Gate) Counts() (allowed, denied int64) {
-	return g.allowed.Load(), g.denied.Load()
-}
-
-// RedirectsBlocked returns how many redirect hops were refused as out of scope.
-func (g *Gate) RedirectsBlocked() int64 { return g.redirect.Load() }
-
-// ErrScopeRefused marks a refusal by the authorization boundary.
-//
-// It is distinguished from a transport failure so the exit-status contract can
-// report an authorization problem differently from a broken tool.
+// ErrScopeRefused marks a refusal by the scope, distinct from a transport failure.
 var ErrScopeRefused = errors.New("refused: target is outside the authorized scope")
 
-// RequireAllowed is the gate. It reports whether a request to target may be
-// issued.
-//
-// It never touches the network.
+// RequireAllowed reports whether a request to target may be issued. It never
+// touches the network.
 func (g *Gate) RequireAllowed(target, port string) error {
 	if g.dryRun {
 		logging.Debug("dry run, would contact %s", target)
@@ -92,11 +74,9 @@ func (g *Gate) RequireAllowed(target, port string) error {
 	}
 
 	if g.sc.Gate(target, port) {
-		g.allowed.Add(1)
 		return nil
 	}
 
-	g.denied.Add(1)
 	g.logDenial(target, port)
 
 	return fmt.Errorf("%w: %s", ErrScopeRefused, describeTarget(target, port))
@@ -125,7 +105,6 @@ func (g *Gate) logDenial(target, port string) {
 	logging.Debug("blocked %s, outside scope", key)
 }
 
-// describeTarget renders a target for a message.
 func describeTarget(target, port string) string {
 	if port == "" {
 		return target

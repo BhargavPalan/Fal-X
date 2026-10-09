@@ -22,37 +22,6 @@ func TestNewIsSelfConsistent(t *testing.T) {
 		t.Errorf("default profile %q is not accepted by ValidProfile", c.Profile)
 	}
 
-	// Every stage is on by default. A stage silently defaulting to off would
-	// make a plain scan quietly incomplete.
-	for name, on := range map[string]bool{
-		"targets": c.DoTargets, "roots": c.DoRoots, "subs": c.DoSubs,
-		"resolve": c.DoResolve, "ports": c.DoPorts, "http": c.DoHTTP,
-		"content": c.DoContent, "scan": c.DoScan,
-	} {
-		if !on {
-			t.Errorf("stage %s is off by default", name)
-		}
-	}
-
-	// The optional, slower stages must be opt-in. Brute force and directory
-	// brute force in particular generate real traffic against a third party.
-	for name, on := range map[string]bool{
-		"brute": c.DoBrute, "dirs": c.DoDirs, "amass": c.DoAmass,
-		"nmap": c.DoNmap, "censys": c.DoCensys,
-	} {
-		if on {
-			t.Errorf("optional stage %s is on by default", name)
-		}
-	}
-
-	// Authorization must not be pre-acknowledged.
-	if c.AuthAck {
-		t.Error("AuthAck defaults to true; authorization must be explicit")
-	}
-	if c.AllowAny || c.AllowPrivate {
-		t.Error("scope overrides default to permissive")
-	}
-
 	for _, tc := range []struct {
 		name string
 		got  int
@@ -62,8 +31,6 @@ func TestNewIsSelfConsistent(t *testing.T) {
 		{"Timeout", c.Timeout, 1},
 		{"PortTop", c.PortTop, 1},
 		{"PortRate", c.PortRate, 1},
-		{"MaxTargets", c.MaxTargets, 1},
-		{"MaxURLs", c.MaxURLs, 1},
 		{"NucleiRate", c.NucleiRate, 1},
 	} {
 		if tc.got < tc.min {
@@ -71,49 +38,6 @@ func TestNewIsSelfConsistent(t *testing.T) {
 		}
 	}
 
-	// The run has to be bounded in wall-clock time as well as in work.
-	if c.MaxRuntime <= 0 {
-		t.Error("MaxRuntime is not positive; a run could never be cut off")
-	}
-}
-
-// TestDetectResourcesClampsLow pins the zero-core case. Reporting zero cores
-// happens on constrained containers, and multiplying it through would produce a
-// zero concurrency that some tools interpret as unlimited.
-func TestDetectResourcesClampsLow(t *testing.T) {
-	c := New()
-	c.DetectResources(0)
-
-	if c.THREADS < 1 || c.JOBS < 1 || c.PortConc < 1 {
-		t.Errorf("zero cores produced non-positive concurrency: threads=%d jobs=%d portconc=%d",
-			c.THREADS, c.JOBS, c.PortConc)
-	}
-	if c.NucleiConcurrency < 1 {
-		t.Errorf("NucleiConcurrency = %d, want at least 1", c.NucleiConcurrency)
-	}
-	if c.JSParallel < 1 {
-		t.Errorf("JSParallel = %d, want at least 1", c.JSParallel)
-	}
-}
-
-// TestDetectResourcesScales pins that concurrency tracks the core count.
-func TestDetectResourcesScales(t *testing.T) {
-	c := New()
-	c.DetectResources(8)
-	if c.THREADS != 80 {
-		t.Errorf("THREADS = %d, want 80", c.THREADS)
-	}
-	if c.JOBS != 16 {
-		t.Errorf("JOBS = %d, want 16", c.JOBS)
-	}
-
-	// An explicit value must be respected rather than overwritten.
-	d := New()
-	d.NucleiConcurrency = 3
-	d.DetectResources(64)
-	if d.NucleiConcurrency != 3 {
-		t.Errorf("DetectResources overwrote an explicit NucleiConcurrency: %d", d.NucleiConcurrency)
-	}
 }
 
 // TestApplyProfile pins the direction of each profile.
@@ -143,12 +67,6 @@ func TestApplyProfile(t *testing.T) {
 		t.Errorf("exhaustive PortTop = %d, want a full sweep", exhaustive.PortTop)
 	}
 
-	if !exhaustive.DoBrute || !exhaustive.DoDirs {
-		t.Error("exhaustive should enable brute force and directory discovery")
-	}
-	if fast.DoBrute || fast.DoDirs {
-		t.Error("fast should not enable brute force or directory discovery")
-	}
 	if !fast.NucleiNoInteract {
 		t.Error("fast should disable interactively-risky templates")
 	}
@@ -157,7 +75,7 @@ func TestApplyProfile(t *testing.T) {
 	again := New()
 	again.Profile = "exhaustive"
 	again.ApplyProfile()
-	if again.PortTop != exhaustive.PortTop || again.DoBrute != exhaustive.DoBrute {
+	if again.PortTop != exhaustive.PortTop {
 		t.Error("ApplyProfile is not deterministic across calls")
 	}
 }

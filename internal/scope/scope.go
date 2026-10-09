@@ -304,11 +304,17 @@ func (e *AllowlistUnusable) Error() string {
 
 // Load reads the allowlist and denylist.
 //
-// It fails closed. A missing, empty, or unreadable allowlist is an error, never
-// an empty rule set, because an empty rule set reads as "nothing is in scope"
-// when it actually means "the authorization was never supplied". On any failure
-// the Scope is left unloaded, so every subsequent Gate call denies; a partially
-// loaded allowlist is never kept.
+// It fails closed. A missing or unreadable allowlist is always an error, because
+// an empty rule set reads as "nothing is in scope" when it actually means "the
+// authorization was never supplied". On any failure the Scope is left unloaded,
+// so every subsequent Gate call denies; a partially loaded allowlist is never
+// kept.
+//
+// An allowlist that is present and readable but holds no usable entry is an error
+// for the same reason, with one deliberate exception: under --allow-any the
+// operator has already said they do not want the file to be the thing that
+// decides, so an empty one is not treated as a missing authorization. The
+// denylist is still loaded in that case, so --exclude keeps applying.
 func (s *Scope) Load(allowPath, denyPath string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -550,12 +556,6 @@ func (s *Scope) Fingerprint() string {
 	defer s.mu.RUnlock()
 	return s.fingerprint
 }
-
-// AllowPrivate reports whether special ranges are permitted.
-func (s *Scope) AllowPrivate() bool { return s.allowPrivate }
-
-// AllowAny reports whether the bare wildcard was accepted.
-func (s *Scope) AllowAny() bool { return s.allowAny }
 
 // Summary counts the loaded rules, for --dry-run output.
 type Summary struct {

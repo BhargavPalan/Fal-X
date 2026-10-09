@@ -79,7 +79,6 @@ func asnNetblocks(ctx context.Context, e *Env) ([]string, error) {
 
 	logging.Info("fetching announced prefixes for %s", e.Opts.ASN)
 
-	// RIPEstat is HTTPS only.
 	endpoint := "https://stat.ripe.net/data/announced-prefixes/data.json?resource=" +
 		url.QueryEscape(e.Opts.ASN)
 
@@ -116,9 +115,8 @@ func asnNetblocks(ctx context.Context, e *Env) ([]string, error) {
 
 // gatedGet fetches a URL through the gate, returning the body.
 //
-// It goes through net.Gate rather than building a client, because the gate is
-// the only place in the codebase that is allowed to issue a request. That is
-// what makes the redirect check and the authorization check unavoidable.
+// It goes through net.Gate rather than building a client, so the authorization
+// check and the per-redirect check cannot be skipped.
 //
 // An out-of-scope refusal is returned as an error rather than silently yielding
 // an empty body, because an empty body and an unreachable API look the same to

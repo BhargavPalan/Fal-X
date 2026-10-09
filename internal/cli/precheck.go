@@ -4,23 +4,21 @@ import (
 	"fmt"
 	"net/netip"
 	"os"
+	"strconv"
 	"strings"
 
+	"github.com/BhargavPalan/Fal-X/internal/logging"
 	"github.com/BhargavPalan/Fal-X/internal/scope"
 	"github.com/BhargavPalan/Fal-X/internal/util"
 )
 
-// Precheck applies the safety preconditions and loads the scope.
+// Precheck applies the safety preconditions and loads the scope. It makes no network
+// request: it decides whether a run may proceed before the first packet, which is
+// why it is a separate step from Parse.
 //
-// It is pure with respect to the network: it decides whether a run may proceed
-// and makes no request. That is what lets the authorization decision be reached
-// before the first packet, and it is why this is a separate step from Parse.
-//
-// There is no blanket "I have authorization" flag. The allowlist is already
-// mandatory and already fails closed, so an acknowledgement beside it is a
-// second gate saying the same thing, and a flag people type reflexively stops
-// being a signal. What is not covered by the allowlist is blast radius, and that
-// is checked on its own: see checkBulkTarget.
+// There is no blanket "I have authorization" flag: naming the target is the
+// authorization, and a flag typed reflexively stops being a signal. What an
+// allowlist cannot express is blast radius, which checkBulkTarget handles on its own.
 func (o *Options) Precheck() error {
 	// Exactly one target. Zero is a usage error rather than a silent no-op,
 	// except for --why-denied, which names its own target and explains one
@@ -61,14 +59,14 @@ func (o *Options) Precheck() error {
 		if o.ScopeRequested {
 			// The operator asked for a boundary and did not get one. Say so rather
 			// than letting the plan imply a restriction that is not in force.
-			logWarnf("scope allowlist unusable, so this %s is not held to one: %v",
+			logging.Warn("scope allowlist unusable, so this %s is not held to one: %v",
 				explainWhat(explaining), loadErr)
 		}
 	}
 
 	o.scope = s
 	for _, w := range s.Warnings() {
-		logWarn(w)
+		logging.Warn("%s", w)
 	}
 
 	// --why-denied explains one decision and a dry run validates a plan. Neither
@@ -110,7 +108,6 @@ func explainWhat(explaining bool) string {
 // an operator chose individually; above it, it is a range nobody enumerated.
 const bulkTargetHostBits = 10
 
-// hostBits returns how many host bits a prefix leaves.
 func hostBits(p netip.Prefix) int { return p.Addr().BitLen() - p.Bits() }
 
 // NeedsConfirm is returned when a target's reach is far wider than its name
@@ -137,7 +134,7 @@ func (e *NeedsConfirm) Error() string { return e.Reason }
 func (o *Options) checkBulkTarget() error {
 	if reason := o.bulkReason(); reason != "" {
 		if o.Yes {
-			logWarnf("confirmed by --yes: %s", reason)
+			logging.Warn("confirmed by --yes: %s", reason)
 			return nil
 		}
 		return &NeedsConfirm{
@@ -188,7 +185,7 @@ func addressCount(p netip.Prefix) string {
 	// Exact for small prefixes, approximate beyond that, because "2^32
 	// addresses" is more useful than a nine-digit number.
 	if hostBits <= 20 {
-		return fmt.Sprintf("%d", uint64(1)<<uint(hostBits))
+		return strconv.FormatUint(uint64(1)<<uint(hostBits), 10)
 	}
 	return fmt.Sprintf("2^%d", hostBits)
 }
@@ -275,8 +272,7 @@ func (o *Options) domainSeeds() []string {
 		if p == "" {
 			continue
 		}
-		// A value naming a readable file is treated as a list, matching the
-		// Bash flag documentation.
+		// A value naming a readable file is a list of domains.
 		if lines, ok := util.ReadLines(p); ok && len(lines) > 0 && util.ValidDomain(lines[0]) {
 			out = append(out, lines...)
 			continue

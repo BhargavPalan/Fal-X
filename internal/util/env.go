@@ -126,7 +126,7 @@ func validEnvKey(k string) bool {
 	if k == "" {
 		return false
 	}
-	for i := 0; i < len(k); i++ {
+	for i := range len(k) {
 		c := k[i]
 		switch {
 		case c >= 'A' && c <= 'Z', c >= 'a' && c <= 'z', c == '_':

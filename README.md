@@ -3,25 +3,31 @@
 ![License: GPL-3.0](https://img.shields.io/badge/License-GPLv3-blue.svg)
 ![Go 1.27+](https://img.shields.io/badge/Go-1.27%2B-00ADD8?logo=go&logoColor=white)
 
-Reconnaissance and attack-surface discovery. Fal-X maps an authorized estate,
-enumerates what is exposed on it, and reports the result in a form you can hand
-to someone else.
+Fal-X turns what a scan finds into a ranked list of what to fix first. It maps an
+authorized estate and enumerates what is exposed on it, which anyone with `nuclei`
+and `httpx` can do; the part that is hard is what happens next. A scanner's
+"medium" can carry a 99th-percentile exploitation probability, and a wall of
+mediums is not a plan. Fal-X keeps every run in a database, joins the findings to
+what the world knows about each CVE (CISA's known-exploited list, EPSS, NVD), and
+ranks them, showing exactly why each one landed where it did. Reports come out as
+Markdown, JSON or SARIF, in a form you can hand to someone else.
 
 It is a security tool. A bare target is scanned directly, the way `nmap` or
 `httpx` would. Pass `--scope` when you want a run held to an allowlist instead.
 
 ## Status
 
-Under active development. The reconnaissance pipeline is complete and tested.
-The later stages of the finding lifecycle are specified but not yet built:
+Under active development. Everything marked shipped below is built and tested;
+the rest of the finding lifecycle is specified but not yet built:
 
 | Area | State |
 |---|---|
 | Reconnaissance (domains, hosts, ports, HTTP, content, scan) | shipped |
 | Reports (Markdown, JSON, SARIF) | shipped |
-| Vulnerability intelligence (CVE/KEV correlation) | planned |
+| Asset inventory in Postgres (`fal-x assets`) | shipped |
+| Vulnerability intelligence (CISA KEV, EPSS, NVD on demand) | shipped; OSV planned |
 | Asset graph and exposure matching | planned |
-| Prioritization | planned |
+| Prioritization (`fal-x prioritize`) | first version shipped |
 | Verification and gated exploitation | planned |
 | Post-exploitation adapters | planned |
 | Enterprise controls (multi-tenant API) | planned |
@@ -134,6 +140,75 @@ rendered.
 
 There is no "I have authorization" flag. You have already named the target, and
 a flag people type reflexively stops being a signal.
+
+## Inventory
+
+With a Postgres database, Fal-X keeps what every run finds as an inventory you can
+query. Apply the schema once, then point it at the database:
+
+```sh
+fal-x migrate up --dsn postgres://user:pass@localhost:5432/falx
+export FALX_DSN=postgres://user:pass@localhost:5432/falx
+
+fal-x scan example.com                          # saved automatically when FALX_DSN is set
+fal-x assets import --from output/example.com/<stamp>   # or save an earlier run
+fal-x assets list --kind url
+fal-x assets show example.com:443
+```
+
+Everything a run finds is kept: subdomains, resolved hosts, addresses, open
+services, live pages with their title, server and technologies, every crawled URL,
+and every finding. Importing a run twice changes nothing. Data is separated per
+organization (`--org`, or `FALX_ORG`) with row-level security. Only `FALX_DSN`
+makes a scan write to the database; `DATABASE_URL` and `PGDSN` are ignored for
+that. The explicit commands (`assets`, `intel`, `prioritize`, `migrate`) also fall
+back to those two when `--dsn` and `FALX_DSN` are absent. If the database is
+unreachable the scan still completes and tells you how to import the run later.
+
+Each organization's rows are hidden from every other by row-level security, which
+is set per transaction. The `fal-x` commands do that for you (`--org`, or
+`FALX_ORG`, default `default`). If you query the tables directly with `psql`, you
+will see nothing until you set the tenant in your session:
+`SELECT set_config('falx.org_id', '<org id>', false);`. That is the isolation
+working, not a missing import.
+
+## Vulnerability intelligence
+
+Fal-X can hold the public feeds that say which CVEs are actually exploited, so a
+finding is read next to what the world knows about it. It needs the same Postgres
+database and no account or key:
+
+```sh
+fal-x intel sync                       # CISA KEV and EPSS; repeats download nothing if unchanged
+fal-x intel enrich                     # CVSS from NVD, for the CVEs in your findings only
+fal-x intel status
+fal-x intel show CVE-2021-44228        # exploited? how likely? how severe?
+fal-x intel search fortinet
+fal-x assets show example.com:22       # findings now show their intelligence
+```
+
+CISA's Known Exploited Vulnerabilities list is the strongest signal that a CVE is
+used in the wild; EPSS is the modelled probability of exploitation in the next 30
+days. A scanner's "medium" can carry a 99th-percentile EPSS, which is exactly the
+gap this closes. NVD is queried on demand for the CVEs in your findings (set
+`NVD_API_KEY` for a higher rate limit); OSV is planned.
+
+## Prioritization
+
+`fal-x prioritize` ranks the findings you have stored, most urgent first, and shows
+its working. Every point comes from a named signal and the reasons add up to the
+score: the scanner's severity, whether the CVE is on CISA's Known Exploited list,
+its EPSS probability, and a rating you give the asset.
+
+```sh
+fal-x assets criticality example.com:443 80    # your rating, 0 to 100
+fal-x prioritize --explain
+fal-x prioritize --format md --out ranked.md   # a document to hand over
+```
+
+The decision is Track, Attend or Act, a simplified reading and not CISA's full
+decision tree. A known-exploited vulnerability is always Act, however the scanner
+rated it. Exposure is not assessed yet, and every derivation says so.
 
 ## Targets
 
@@ -255,10 +330,17 @@ Four rules hold the authorization boundary in place:
 2. `internal/net` is the only place a request is issued, so the authorization
    check is unavoidable. Redirects are followed one hop at a time, with the gate
    applied to every hop.
-3. `internal/util` owns all parsing. One host and URL parser, so a CIDR cannot
-   be read two different ways in two different packages.
-4. `internal/tools` is the only place an external binary is launched. Arguments
-   are a string slice and never reach a shell.
+3. Every host that reaches the authorization decision is parsed by
+   `internal/util`, and nothing else. `scope` and `net` both reduce a target
+   through `util.URLHost`/`util.URLPort`, so a CIDR or a userinfo string cannot
+   be read one way by the gate and another by whatever dials it. Packages that
+   parse a URL for their own reasons, such as `internal/net` resolving a
+   `Location` header, are not making an authorization decision.
+4. `internal/tools` is the only place a reconnaissance tool is launched.
+   Arguments are a string slice and never reach a shell. The one other place
+   that runs a subprocess is `internal/installer`, which shells out to the Go
+   toolchain to build and version the tools themselves; it never touches a
+   target.
 
 ## Releases
 

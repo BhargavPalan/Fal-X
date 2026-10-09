@@ -3,6 +3,7 @@ package util
 import (
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 // A bare address must survive verbatim. Port scanners emit them, and a caller
@@ -181,22 +182,6 @@ func TestJoinHostPort(t *testing.T) {
 	}
 }
 
-// TestSplitScheme pins that a missing scheme yields "" rather than the input.
-func TestSplitScheme(t *testing.T) {
-	cases := []struct{ in, want string }{
-		{"https://example.com", "https"},
-		{"http://example.com", "http"},
-		{"ftp://example.com", "ftp"},
-		{"example.com", ""},
-		{"", ""},
-	}
-	for _, tc := range cases {
-		if got := SplitScheme(tc.in); got != tc.want {
-			t.Errorf("SplitScheme(%q) = %q, want %q", tc.in, got, tc.want)
-		}
-	}
-}
-
 // TestValidDomain pins the hostname grammar.
 //
 // The interesting part is the length and label rules. Too permissive a pattern
@@ -242,25 +227,6 @@ func label63() string {
 // label64 returns a label of 64 characters, one over the maximum.
 func label64() string {
 	return strings.Repeat("a", 64)
-}
-
-// TestIsIPv4 pins strictness. netip.ParseAddr accepts forms a scanner must not,
-// and a leading-zero address is ambiguous between octal and decimal.
-func TestIsIPv4(t *testing.T) {
-	for _, s := range []string{"0.0.0.0", "192.0.2.5", "255.255.255.255", "1.2.3.4"} {
-		if !IsIPv4(s) {
-			t.Errorf("IsIPv4(%q) = false, want true", s)
-		}
-	}
-	for _, s := range []string{
-		"", "256.0.0.1", "1.2.3", "1.2.3.4.5", "01.2.3.4", "1.2.3.4 ",
-		" 1.2.3.4", "example.com", "::1", "2001:db8::1", "-1.2.3.4",
-		"1.2.3.-4", "1.2.3.4/24",
-	} {
-		if IsIPv4(s) {
-			t.Errorf("IsIPv4(%q) = true, want false", s)
-		}
-	}
 }
 
 // TestIsIPv6 pins that a mapped IPv4 address counts as IPv6, because
@@ -310,5 +276,25 @@ func TestIsPortOrRange(t *testing.T) {
 		if IsPortOrRange(s) {
 			t.Errorf("IsPortOrRange(%q) = true, want false", s)
 		}
+	}
+}
+
+func TestURLHostRejectsUnsafeBytes(t *testing.T) {
+	for _, raw := range []string{"a\x00b.example.com", "http://a\tb.example.com/", "exa mple.com", "http://a\x7f.example.com", "\xff.example.com", "[::1\x00]:80"} {
+		if h, ok := URLHost(raw); ok {
+			t.Errorf("URLHost(%q) = %q, want no host", raw, h)
+		}
+	}
+}
+
+func TestTruncateNeverSplitsACharacter(t *testing.T) {
+	for n := -1; n <= 12; n++ {
+		got := Truncate("héllo wörld ✓", n)
+		if !utf8.ValidString(got) {
+			t.Fatalf("n=%d: %q is not valid UTF-8", n, got)
+		}
+	}
+	if got := Truncate("short", 10); got != "short" {
+		t.Errorf("a string within the limit changed: %q", got)
 	}
 }

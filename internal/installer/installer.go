@@ -1,19 +1,17 @@
 // Package installer installs the external reconnaissance tools Fal-X drives.
 //
-// It is the single source of truth for which tools are needed and at which
-// versions. The `fal-x install` command is the only caller; there is no separate
-// shell or PowerShell script to drift out of step with this table.
+// The Tools table is the single source of truth for which tools are needed, and
+// the `fal-x install` command is its only caller.
 //
-// Tools are installed with `go install <pkg>@<version>`. The Go toolchain builds
-// each one for the host operating system and architecture automatically, so the
-// same command produces the right binary on linux/amd64, darwin/arm64,
-// windows/amd64, a Raspberry Pi's linux/arm, and everything in between. There is
-// no per-architecture download to get wrong.
+// Each tool is installed with `go install <pkg>@latest`, so the Go toolchain builds
+// it for the host operating system and architecture and there is no
+// per-architecture download to get wrong.
 package installer
 
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -146,8 +144,7 @@ func Install(ctx context.Context, opts Options) error {
 	return nil
 }
 
-// goToolchain locates the Go toolchain and the directory it installs into,
-// returning a clear, OS-specific error when Go is absent.
+// goToolchain locates the Go toolchain and the directory it installs into.
 func goToolchain(ctx context.Context, w io.Writer) (goBin string, err error) {
 	if !available("go") {
 		return "", fmt.Errorf("go is required to install the tools but is not on PATH.\n"+
@@ -178,7 +175,7 @@ func goInstall(ctx context.Context, goBin string, t Tool) error {
 		if msg == "" {
 			return err
 		}
-		return fmt.Errorf("%s", lastLine(msg))
+		return errors.New(lastLine(msg))
 	}
 	return nil
 }
@@ -187,7 +184,7 @@ func goInstall(ctx context.Context, goBin string, t Tool) error {
 // against. It is best-effort: a lock that cannot be written does not fail an
 // otherwise successful install.
 func writeLock(ctx context.Context, w io.Writer, withOpt bool) {
-	path := filepath.Join(".", "tools.lock")
+	const path = "tools.lock"
 	f, err := os.Create(path) //nolint:gosec // a fixed, non-user path in the working directory
 	if err != nil {
 		fmt.Fprintf(w, "[!] could not write %s: %v\n", path, err)
@@ -211,8 +208,7 @@ func writeLock(ctx context.Context, w io.Writer, withOpt bool) {
 	fmt.Fprintf(w, "[+] wrote %s\n", path)
 }
 
-// platformNotes prints guidance that depends on the host, so a user is not left
-// wondering why a tool behaves differently than on another OS.
+// platformNotes prints guidance that depends on the host.
 func platformNotes(w io.Writer, withOpt bool) {
 	if runtime.GOOS == "windows" {
 		fmt.Fprintf(w, "[!] naabu's fast SYN scan needs Npcap on Windows (https://npcap.com);\n"+
@@ -265,13 +261,11 @@ func Setup(w io.Writer) error {
 	}
 
 	created := 0
-	// scope.txt from the inline starter.
 	n, err := writeIfAbsent(w, filepath.Join(dir, "scope.txt"), []byte(scopeStarter))
 	if err != nil {
 		return err
 	}
 	created += n
-	// out-of-scope.txt and .env from their examples, when present.
 	for _, name := range []string{"out-of-scope.txt", ".env"} {
 		src := filepath.Join(dir, name+".example")
 		b, err := os.ReadFile(src) //nolint:gosec // a fixed path under ./config
@@ -307,8 +301,7 @@ func writeIfAbsent(w io.Writer, path string, data []byte) (int, error) {
 }
 
 // moduleVersion returns the module version stamped into an installed binary, via
-// `go version -m`. It falls back to "unknown" for a tool not built by the Go
-// toolchain or when the probe fails, so tools.lock always has a row.
+// `go version -m`, or "unknown" so tools.lock always has a row.
 func moduleVersion(ctx context.Context, binPath string) string {
 	out, err := exec.CommandContext(ctx, "go", "version", "-m", binPath).Output()
 	if err != nil {

@@ -2,7 +2,9 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"embed"
+	"errors"
 	"fmt"
 	"io/fs"
 	"sort"
@@ -150,7 +152,7 @@ func appliedVersion(ctx context.Context, db *DB, version int) (bool, int, error)
 	switch {
 	case err == nil:
 		return true, dur, nil
-	case isNoRows(err):
+	case errors.Is(err, sql.ErrNoRows):
 		return false, 0, nil
 	default:
 		return false, 0, fmt.Errorf("store: read ledger: %w", err)
@@ -198,7 +200,7 @@ func (d *DB) Migrate(ctx context.Context) (applied int, err error) {
 	// Capture the schema fingerprint only once the migrations have all landed,
 	// so the stored value describes the finished schema.
 	if applied > 0 {
-		if err := d.captureFingerprint(ctx); err != nil {
+		if err := d.CaptureFingerprint(ctx); err != nil {
 			return applied, err
 		}
 	}
@@ -293,7 +295,7 @@ func (d *DB) Status(ctx context.Context) ([]MigrationStatus, error) {
 			st.Applied = true
 			st.AppliedAt = appliedAt.UTC().Format(time.RFC3339)
 			st.Drift = st.Checksum != checksum(m.Up)
-		case isNoRows(err):
+		case errors.Is(err, sql.ErrNoRows):
 			st.Applied = false
 		default:
 			return nil, err

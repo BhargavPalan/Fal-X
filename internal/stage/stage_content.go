@@ -3,7 +3,6 @@ package stage
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"sort"
 	"strconv"
 	"strings"
@@ -41,7 +40,6 @@ func Content(ctx context.Context, e *Env) error {
 	var allURLs []string
 	var notes []string
 
-	// Crawling.
 	if e.Tools.Available("katana") {
 		args := []string{
 			"-silent",
@@ -116,7 +114,6 @@ func Content(ctx context.Context, e *Env) error {
 		}
 	}
 
-	// Normalise and deduplicate.
 	allURLs = dedupeSorted(allURLs)
 	endpoints = dedupeSorted(append(endpoints, allURLs...))
 
@@ -208,100 +205,6 @@ func parseKatanaJSONL(stdout string) []string {
 	return out
 }
 
-// collectCRTSh queries certificate transparency logs for a root.
-//
-// crt.sh rate-limits hard and returns 502 under load, so only the transport
-// failure is retried. A 4xx is never retried, because retrying a refusal just
-// wastes the budget.
-func collectCRTSh(ctx context.Context, e *Env, roots []string) ([]string, error) {
-	const attempts = 3
-
-	var out []string
-	var lastErr error
-
-	for _, d := range roots {
-		if !e.Gate.Scope().Gate(d, "") {
-			continue
-		}
-
-		endpoint := "https://crt.sh/?output=json&q=%25." + d
-
-		var body []byte
-		for attempt := 1; attempt <= attempts; attempt++ {
-			resp, err := e.Gate.GetContext(ctx, endpoint)
-			if err != nil {
-				lastErr = err
-				if ctx.Err() != nil {
-					return out, ctx.Err()
-				}
-				continue
-			}
-			if resp.StatusCode >= 500 {
-				lastErr = fmt.Errorf("crt.sh returned %d", resp.StatusCode)
-				continue
-			}
-			if resp.StatusCode >= 400 {
-				// A 4xx is a refusal, not a transient failure.
-				lastErr = fmt.Errorf("crt.sh refused with %d", resp.StatusCode)
-				break
-			}
-			body = resp.Body
-			lastErr = nil
-			break
-		}
-		if body == nil {
-			logging.Debug("subs: crt.sh lookup failed for %s: %v", d, lastErr)
-			continue
-		}
-
-		out = append(out, parseCRTShNames(body)...)
-	}
-
-	return out, nil
-}
-
-// parseCRTShNames extracts the names from a crt.sh response.
-//
-// A single name_value field carries several comma-separated names, including
-// wildcard entries, so it is split before the wildcard prefix is stripped.
-func parseCRTShNames(body []byte) []string {
-	var entries []struct {
-		NameValue string `json:"name_value"`
-	}
-	if err := json.Unmarshal(body, &entries); err != nil {
-		return nil
-	}
-
-	var out []string
-	for _, e := range entries {
-		for _, name := range strings.Split(e.NameValue, ",") {
-			n := strings.TrimSpace(strings.ToLower(name))
-			n = strings.TrimPrefix(n, "*.")
-			if util.ValidDomain(n) {
-				out = append(out, n)
-			}
-		}
-	}
-	return out
-}
-
-// safeCollect runs a collector, converting a panic into an error.
-//
-// A collector is third-party output. One that crashes must cost its own results
-// and nothing else.
-func safeCollect(ctx context.Context,
-	fn func(context.Context, *Env, []string) ([]string, error),
-	e *Env, roots []string,
-) (lines []string, err error) {
-	defer func() {
-		if rec := recover(); rec != nil {
-			lines = nil
-			err = fmt.Errorf("collector panicked: %v", rec)
-		}
-	}()
-	return fn(ctx, e, roots)
-}
-
 // dedupeSorted removes duplicates and returns the result sorted.
 func dedupeSorted(in []string) []string {
 	if len(in) == 0 {
@@ -322,5 +225,3 @@ func dedupeSorted(in []string) []string {
 	sort.Strings(out)
 	return out
 }
-
-// unusedPath keeps the filepath import honest for the helpers above.

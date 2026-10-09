@@ -3,8 +3,10 @@ package stage
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -38,7 +40,7 @@ func HTTP(ctx context.Context, e *Env) error {
 
 	if e.Opts.IPMode {
 		if pairs, ok := util.ReadLines(e.Paths.OpenPorts()); ok && len(pairs) > 0 {
-			input = e.Paths.HTTPDir + "/probe_targets.txt"
+			input = filepath.Join(e.Paths.HTTPDir, "probe_targets.txt")
 			explicit = true
 
 			// Each pair becomes an explicit URL, so httpx probes that port
@@ -78,7 +80,7 @@ func HTTP(ctx context.Context, e *Env) error {
 		if err := writeHTTPOutputs(livePath, jsonlPath, nil, nil); err != nil {
 			return err
 		}
-		return fmt.Errorf("httpx is not installed")
+		return errors.New("httpx is not installed")
 	}
 
 	// The gate is applied to the input before the probe, so httpx never sees an
@@ -257,7 +259,7 @@ func Scan(ctx context.Context, e *Env) error {
 		if err := util.WriteLines(findingsPath, nil); err != nil {
 			return err
 		}
-		return fmt.Errorf("nuclei is not installed")
+		return errors.New("nuclei is not installed")
 	}
 
 	gated := filepath.Join(e.Paths.ScanDir, "targets.scoped.txt")
@@ -311,9 +313,12 @@ func Scan(ctx context.Context, e *Env) error {
 	// would put an unauthorized asset into the report.
 	var kept []string
 	for _, f := range findings {
-		if host := findingHost(f); host == "" || e.Gate.Scope().Gate(host, "") {
+		host, ok := findingHost(f)
+		if ok && e.Gate.Scope().Gate(host, "") {
 			kept = append(kept, f)
+			continue
 		}
+		logging.Debug("scan: dropped finding with no in-scope host: %s", f)
 	}
 
 	if err := util.WriteLines(findingsPath, kept); err != nil {
@@ -335,15 +340,20 @@ func Scan(ctx context.Context, e *Env) error {
 	return nil
 }
 
-// findingHost extracts the host from a nuclei finding line.
+// nucleiLine is nuclei's default text output:
 //
-// nuclei emits "host:port [status] [severity] template-id - description". The
-// host is parsed structurally because a split on the colon would corrupt IPv6.
-func findingHost(line string) string {
-	fields := strings.Fields(line)
-	if len(fields) == 0 {
-		return ""
+//	[template-id(:matcher)] [protocol] [severity] target ["extracted"] [meta]
+var nucleiLine = regexp.MustCompile(`^\[[^\]]+\]\s+\[[^\]]+\]\s+\[[^\]]+\]\s+(\S+)`)
+
+// findingHost extracts the host a finding is about. It reports false for a line
+// that is not in nuclei's format or names no usable target, and such a line is
+// dropped: a finding whose host cannot be checked cannot be shown to be in scope.
+//
+// The host is parsed structurally because a split on the colon would corrupt IPv6.
+func findingHost(line string) (string, bool) {
+	m := nucleiLine.FindStringSubmatch(line)
+	if m == nil {
+		return "", false
 	}
-	host, _ := util.HostPortSplit(fields[0])
-	return host
+	return util.URLHost(m[1])
 }

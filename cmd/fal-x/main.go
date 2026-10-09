@@ -1,12 +1,6 @@
-// Command fal-x is the Fal-X entrypoint: reconnaissance, exposure
-// management, and authorized security assessment.
-//
-// Exit status contract:
-//
-//	0  success
-//	1  runtime failure, such as a stage or tool failing
-//	2  usage or validation error
-//	3  authorization or scope refusal
+// Command fal-x is the Fal-X command line: scan a target, keep what it finds, enrich
+// it with exploitation intelligence, and rank it. The exit-status contract is in
+// internal/logging.
 package main
 
 import (
@@ -21,6 +15,7 @@ import (
 	"runtime"
 	"runtime/debug"
 	"sort"
+	"strings"
 	"syscall"
 
 	"github.com/BhargavPalan/Fal-X/internal/config"
@@ -36,27 +31,23 @@ type command struct {
 
 var commands = []command{
 	{"scan", "reconnaissance pipeline against authorized targets", runScan},
-	{"intel", "vulnerability intelligence: sync, show, search", runIntel},
-	{"assets", "inventory management: import, list, show", runAssets},
-	{"match", "match the inventory against the vulnerability corpus", runMatch},
-	{"prioritize", "rank findings by exploitability and asset criticality", runPrioritize},
-	{"verify", "confirm a finding against the live target", runVerify},
-	{"exploit", "run an exploit module (requires authorization and consent)", runExploit},
-	{"session", "session tracking and evidence collection", runSession},
+	{"intel", "vulnerability intelligence: sync, enrich, status, show, search", runIntel},
+	{"assets", "inventory in Postgres: import, list, show, criticality", runAssets},
+	{"match", "match the inventory against the vulnerability corpus (not built yet)", runMatch},
+	{"prioritize", "rank stored findings by urgency, showing why", runPrioritize},
+	{"verify", "confirm a finding against the live target (not built yet)", runVerify},
+	{"exploit", "run a gated exploit module (not built yet)", runExploit},
+	{"session", "session tracking and evidence collection (not built yet)", runSession},
 	{"report", "render findings as markdown, JSON, or SARIF", runReport},
-	{"serve", "run the HTTP API", runServe},
+	{"serve", "run the HTTP API (not built yet)", runServe},
 	{"migrate", "apply, roll back, or inspect database migrations", runMigrate},
 	{"install", "install the external reconnaissance tools for this platform", runInstall},
 	{"wordlists", "list or fetch the open-source wordlists for brute-force stages", runWordlists},
 	{"version", "print version information", runVersion},
 }
 
-// exitCode maps the result of a subcommand onto the exit status.
-//
-// It lives here rather than in logging because a help request is not a failure
-// and not a usage error: the command succeeded at its only job. Everything else
-// is classified by the one exit-status contract in internal/logging, so there is
-// still exactly one place that decides what each failure means.
+// exitCode maps the result of a subcommand onto the exit status. A help request is
+// a success; everything else is classified by logging.ExitFor.
 func exitCode(err error) int {
 	switch {
 	case err == nil:
@@ -74,20 +65,17 @@ func main() {
 	os.Exit(realMain())
 }
 
-// realMain executes the command and returns the process exit status. It is kept
-// apart from main so its deferred cleanup runs before the process exits, which
-// os.Exit would otherwise skip.
+// realMain runs the command and returns the exit status. It is apart from main so
+// its deferred cleanup runs before os.Exit.
 func realMain() int {
-	// A signal cancels the context so a stage can stop at the next checkpoint
-	// rather than the process being killed mid-write.
+	// A signal cancels the context, so a stage stops at its next checkpoint instead
+	// of being killed mid-write.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	err := dispatch(ctx, os.Args[1:])
 	switch {
 	case err == nil, errors.Is(err, errHelp):
-		// errHelp means the subcommand printed its own usage. That is a success.
-		return logging.StatusOK
 	case errors.Is(err, context.Canceled):
 		logging.Error("interrupted")
 	default:
@@ -179,9 +167,7 @@ func usage(w io.Writer) {
 
 	width := 0
 	for _, c := range cmds {
-		if len(c.name) > width {
-			width = len(c.name)
-		}
+		width = max(width, len(c.name))
 	}
 	for _, c := range cmds {
 		fmt.Fprintf(w, "  %-*s  %s\n", width, c.name, c.summary)
@@ -205,10 +191,8 @@ Run "fal-x <command> --help" for the flags of a command.
 `)
 }
 
-// errHelp signals that a subcommand was asked for its own usage.
-//
-// It is a sentinel rather than a nil error because "printed the help and exited
-// zero" and "ran and succeeded" must not be the same outcome to the caller.
+// errHelp means a subcommand printed its own usage. It is not nil, so "printed the
+// help" and "ran and succeeded" stay different outcomes to the caller.
 var errHelp = errors.New("help requested")
 
 // flagSet returns a flag set that reports usage errors through the status
@@ -221,13 +205,9 @@ func flagSet(name string) *flag.FlagSet {
 	return fs
 }
 
-// wantsHelpArgs reports whether help was requested anywhere in args.
-//
-// Help is detected by scanning rather than by running the arguments through a
-// flag set. A probe set would have to declare every flag the subcommand accepts
-// just to survive the parse, and the moment one is added to the real parser and
-// forgotten in the probe, every invocation of that subcommand fails with
-// "flag provided but not defined".
+// wantsHelpArgs reports whether help was requested anywhere in args. It scans rather
+// than parsing, because a probe flag set would have to declare every flag the
+// subcommand accepts just to survive the parse.
 func wantsHelpArgs(args []string) bool {
 	for _, a := range args {
 		if a == "-h" || a == "--help" {
@@ -246,17 +226,14 @@ func printUsage(synopsis string, fs *flag.FlagSet) {
 	}
 }
 
-// parseFlags parses and reports. A parse failure is a usage error.
-//
-// synopsis is the caller's usage line, because it knows which subcommand
-// arguments matter. Deriving one from the flag set name loses that, which is how
-// "fal-x migrate" came to advertise neither <up>, <down> nor <status>.
+// parseFlags parses args; a parse failure is a usage error. synopsis is the caller's
+// usage line, since only the caller knows which positional arguments matter.
 func parseFlags(fs *flag.FlagSet, synopsis string, args []string) error {
 	if wantsHelpArgs(args) {
 		printUsage(synopsis, fs)
 		return errHelp
 	}
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(flagsFirst(fs, args)); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			printUsage(synopsis, fs)
 			return errHelp
@@ -264,6 +241,42 @@ func parseFlags(fs *flag.FlagSet, synopsis string, args []string) error {
 		return logging.Usagef("%v", err)
 	}
 	return nil
+}
+
+// flagsFirst moves every flag in args ahead of the positional arguments, so a flag
+// means the same wherever it is typed. The flag package stops at the first
+// non-flag, which would turn "intel search fortinet --limit 3" into a search for
+// the text "fortinet --limit 3". A "--" ends flags as usual.
+func flagsFirst(fs *flag.FlagSet, args []string) []string {
+	var flags, positional []string
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "--" {
+			positional = append(positional, args[i:]...)
+			break
+		}
+		if len(a) < 2 || a[0] != '-' {
+			positional = append(positional, a)
+			continue
+		}
+		flags = append(flags, a)
+		name := strings.TrimLeft(a, "-")
+		if strings.Contains(name, "=") {
+			continue // the value is attached
+		}
+		f := fs.Lookup(name)
+		if f == nil {
+			continue // unknown: let Parse report it
+		}
+		if b, ok := f.Value.(interface{ IsBoolFlag() bool }); ok && b.IsBoolFlag() {
+			continue
+		}
+		if i+1 < len(args) {
+			i++
+			flags = append(flags, args[i]) // this flag's value
+		}
+	}
+	return append(flags, positional...)
 }
 
 func runVersion(_ context.Context, args []string) error {

@@ -1,9 +1,14 @@
 package stage
 
 import (
+	"context"
+	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+
+	"github.com/BhargavPalan/Fal-X/internal/tools"
 )
 
 // TestRootsFiltersThroughScope pins that the roots stage keeps only names the
@@ -302,5 +307,43 @@ func TestResolveGatesExtractedAddresses(t *testing.T) {
 	ips := h.read(h.paths.Addresses())
 	if len(ips) != 0 {
 		t.Errorf("addresses = %q, want the out-of-scope address dropped", ips)
+	}
+}
+
+// dumpProbe notes whether the host list was on disk when the record dump ran.
+type dumpProbe struct {
+	*fixtureRunner
+	hostFile string
+	present  bool
+}
+
+func (p *dumpProbe) Run(ctx context.Context, name string, args ...string) (tools.Result, error) {
+	if name == "dnsx" && slices.Contains(args, "-nc") {
+		_, err := os.Stat(p.hostFile)
+		p.present = err == nil
+	}
+	return p.fixtureRunner.Run(ctx, name, args...)
+}
+
+// TestResolveWritesTheHostListBeforeTheRecordDump pins that the record dump has a
+// file to read. Run first, it finds nothing and the per-host fallback rescues it, so
+// the fault costs time and hides itself.
+func TestResolveWritesTheHostListBeforeTheRecordDump(t *testing.T) {
+	h := newHarness(t, "example.com\n192.0.2.0/24\n", "")
+	h.seed(h.paths.Roots(), "example.com\n")
+	h.fx.on("dnsx", []string{"-silent", "-t", "10", "-l", filepath.Join(h.paths.ResolveDir, "candidates.scoped.txt")},
+		"example.com\n")
+	h.fx.on("dnsx", []string{"-silent", "-nc", "-l", h.paths.Resolved(),
+		"-a", "-aaaa", "-cname", "-ns", "-mx", "-resp", "-resp-only"},
+		"example.com [A] 192.0.2.10\n")
+
+	probe := &dumpProbe{fixtureRunner: h.fx, hostFile: h.paths.Resolved()}
+	h.env.Tools = probe
+
+	if err := h.runStage("resolve", Resolve); err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if !probe.present {
+		t.Error("the record dump ran before the host list it reads was written")
 	}
 }

@@ -2,8 +2,6 @@ package logging
 
 import (
 	"bytes"
-	"errors"
-	"fmt"
 	"strings"
 	"testing"
 )
@@ -19,10 +17,8 @@ func capture(t *testing.T, level Level, asJSON bool) *bytes.Buffer {
 	var buf bytes.Buffer
 	prevOut, prevErr := std.out, std.errOut
 	prevJSON, prevTimestamps, prevColor := std.json, std.stamps, std.color
-	prevLevel := CurrentLevel()
-	prevExtra := std.extra
+	prevLevel := std.level
 
-	std.extra = nil
 	SetOutputs(&buf, &buf)
 	SetLevel(level)
 	SetJSON(asJSON)
@@ -31,9 +27,8 @@ func capture(t *testing.T, level Level, asJSON bool) *bytes.Buffer {
 		std.mu.Lock()
 		std.out, std.errOut = prevOut, prevErr
 		std.json, std.stamps, std.color = prevJSON, prevTimestamps, prevColor
-		std.extra = prevExtra
+		std.level = prevLevel
 		std.mu.Unlock()
-		SetLevel(prevLevel)
 	})
 
 	return &buf
@@ -160,176 +155,5 @@ func TestLevelQuietIsNotAnAliasForError(t *testing.T) {
 	Error("this should not appear")
 	if strings.TrimSpace(buf.String()) != "" {
 		t.Errorf("quiet level emitted %q, want nothing", buf.String())
-	}
-}
-
-// TestParseLevel pins the level parser used by configuration.
-func TestParseLevel(t *testing.T) {
-	cases := map[string]Level{
-		"debug":    LevelDebug,
-		"DEBUG":    LevelDebug,
-		"info":     LevelInfo,
-		"warn":     LevelWarn,
-		"warning":  LevelWarn,
-		"error":    LevelError,
-		"quiet":    LevelQuiet,
-		"":         LevelInfo,
-		"  info  ": LevelInfo,
-	}
-	for in, want := range cases {
-		if got := ParseLevel(in); got != want {
-			t.Errorf("ParseLevel(%q) = %v, want %v", in, got, want)
-		}
-	}
-
-	// An unrecognised level falls back rather than silencing the logger, which
-	// would hide a typo that turns into a run that reports nothing.
-	if got := ParseLevel("verbose"); got != LevelInfo {
-		t.Errorf("ParseLevel(\"verbose\") = %v, want the %v default", got, LevelInfo)
-	}
-}
-
-// TestRefusalOf pins the classification the exit-status contract depends on.
-//
-// An unclassified error has to be a runtime failure rather than a usage error.
-// Reporting a tool failure as a caller mistake would send an operator looking at
-// their command line instead of at the tool.
-func TestRefusalOf(t *testing.T) {
-	cases := []struct {
-		name string
-		err  error
-		want Refusal
-	}{
-		{"nil", nil, RefuseNone},
-		{"plain", errors.New("boom"), RefuseNone},
-		{"runtime", Runtimef("stage failed"), RefuseNone},
-		{"usage", Usagef("bad flag"), RefuseUsage},
-		{"usage wrapped", fmt.Errorf("scan: %w", Usagef("bad flag")), RefuseUsage},
-		{"scope", Scopef("no allowlist"), RefuseScope},
-		{"scope wrapped", fmt.Errorf("preflight: %w", Scopef("no allowlist")), RefuseScope},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := RefusalOf(tc.err); got != tc.want {
-				t.Errorf("RefusalOf(%v) = %v, want %v", tc.err, got, tc.want)
-			}
-		})
-	}
-}
-
-// TestRefusalString pins that the three categories stay distinguishable in a
-// message, which is all a human has to go on.
-func TestRefusalString(t *testing.T) {
-	seen := map[string]bool{}
-	for _, r := range []Refusal{RefuseNone, RefuseUsage, RefuseScope} {
-		s := r.String()
-		if s == "" {
-			t.Errorf("Refusal %d has no string form", r)
-		}
-		if seen[s] {
-			t.Errorf("Refusal string %q is used twice", s)
-		}
-		seen[s] = true
-	}
-}
-
-// TestTeeCopiesToBothWriters pins that a caller can mirror the log without
-// taking it over.
-func TestTeeCopiesToBothWriters(t *testing.T) {
-	var primary, mirror bytes.Buffer
-	prevOut, prevErr := std.out, std.errOut
-	prevExtra := std.extra
-	prevLevel := CurrentLevel()
-
-	std.extra = nil
-	SetOutputs(&primary, &primary)
-	SetLevel(LevelDebug)
-	SetTimestamps(false)
-	SetColor(false)
-
-	t.Cleanup(func() {
-		std.mu.Lock()
-		std.out, std.errOut = prevOut, prevErr
-		std.extra = prevExtra
-		std.mu.Unlock()
-		SetLevel(prevLevel)
-	})
-
-	Info("mirrored")
-	if !strings.Contains(primary.String(), "mirrored") {
-		t.Fatalf("primary writer got %q", primary.String())
-	}
-
-	Tee(&mirror)
-	Info("second")
-	if !strings.Contains(mirror.String(), "second") {
-		t.Errorf("mirror writer got %q, want the later message", mirror.String())
-	}
-	if !strings.Contains(primary.String(), "second") {
-		t.Errorf("primary writer lost the message after Tee: %q", primary.String())
-	}
-}
-
-// TestFatalVariantsUseTheRightStatus pins each helper's status.
-func TestFatalVariantsUseTheRightStatus(t *testing.T) {
-	cases := []struct {
-		name string
-		fn   func()
-		want int
-	}{
-		{"Fatal", func() { Fatal("boom") }, StatusRuntime},
-		{"FatalUsage", func() { FatalUsage("bad flag") }, StatusUsage},
-		{"FatalScope", func() { FatalScope("no allowlist") }, StatusScope},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			capture(t, LevelDebug, false)
-
-			got := -1
-			prev := exitFn
-			SetExitFunc(func(code int) { got = code })
-			t.Cleanup(func() { SetExitFunc(prev) })
-
-			tc.fn()
-			if got != tc.want {
-				t.Errorf("exited %d, want %d", got, tc.want)
-			}
-		})
-	}
-}
-
-// TestDefaultWritersAreSet guards against a build where no writer is wired,
-// which would make the tool silent rather than obviously broken.
-func TestDefaultWritersAreSet(t *testing.T) {
-	lg := Default()
-	if lg == nil {
-		t.Fatal("Default() returned nil")
-	}
-	lg.mu.Lock()
-	defer lg.mu.Unlock()
-	if lg.out == nil {
-		t.Error("stdout writer is nil")
-	}
-	if lg.errOut == nil {
-		t.Error("stderr writer is nil")
-	}
-}
-
-// TestHaveAndMissing pins the tool-presence helpers, which decide whether a
-// stage reports itself as skipped.
-func TestHaveAndMissing(t *testing.T) {
-	// These two exist on any system running the tests.
-	if !Have("go") && !Have("sh") {
-		t.Skip("neither go nor sh is on PATH")
-	}
-	missing := Missing("go", "falx-definitely-not-installed", "sh",
-		"also-definitely-not-installed")
-	if len(missing) != 2 {
-		t.Errorf("Missing returned %v, want the two absent tools", missing)
-	}
-	if HaveAll("falx-definitely-not-installed") {
-		t.Error("HaveAll accepted an absent tool")
 	}
 }

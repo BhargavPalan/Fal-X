@@ -51,7 +51,7 @@ bench:
 # once per discovered URL.
 .PHONY: bench-hot
 bench-hot:
-	@go test -run=XXX -bench='Gate|Explain|FilterURLs' -benchmem ./internal/...
+	@go test -run=XXX -bench='Gate|Explain' -benchmem ./internal/...
 
 # Version is taken from the current git tag, or a short commit when untagged.
 # Releases set it the same way through GoReleaser.

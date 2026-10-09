@@ -40,15 +40,13 @@ func newFixture() *fixtureRunner {
 }
 
 // on registers stdout for an exact invocation.
-func (f *fixtureRunner) on(name string, args []string, stdout string) *fixtureRunner {
+func (f *fixtureRunner) on(name string, args []string, stdout string) {
 	f.responses[name+" "+strings.Join(args, " ")] = stdout
-	return f
 }
 
 // without marks a tool as not installed.
-func (f *fixtureRunner) without(name string) *fixtureRunner {
+func (f *fixtureRunner) without(name string) {
 	f.missing[name] = true
-	return f
 }
 
 func (f *fixtureRunner) Run(_ context.Context, name string, args ...string) (tools.Result, error) {

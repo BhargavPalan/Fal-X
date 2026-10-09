@@ -3,16 +3,22 @@ package stage
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/BhargavPalan/Fal-X/internal/logging"
 	"github.com/BhargavPalan/Fal-X/internal/util"
 )
+
+// censysTick is the pause between Censys lookups; the free tier allows one request
+// per second, and waiting beats a partial result from being rate limited.
+const censysTick = time.Second
 
 // Ports scans for open ports, then optionally detects services.
 //
@@ -36,17 +42,17 @@ func Ports(ctx context.Context, e *Env) error {
 	if len(hosts) == 0 {
 		logging.Warn("no hosts to scan for open ports")
 		e.Run.SetNote("ports", "no hosts to scan")
-		return writePortsOutputs(out, nil)
+		return util.WriteLines(out, nil)
 	}
 	e.Run.SetInputs(len(hosts))
 
 	if !e.Tools.Available("naabu") {
 		logging.Warn("naabu is not installed; port scan skipped")
 		e.Run.SetNote("ports", "naabu missing")
-		if err := writePortsOutputs(out, nil); err != nil {
+		if err := util.WriteLines(out, nil); err != nil {
 			return err
 		}
-		return fmt.Errorf("naabu is not installed")
+		return errors.New("naabu is not installed")
 	}
 
 	// Arguments are a slice, so the port list reaches the scanner as one argument
@@ -94,7 +100,7 @@ func Ports(ctx context.Context, e *Env) error {
 	}
 	sort.Strings(kept)
 
-	if err := writePortsOutputs(out, kept); err != nil {
+	if err := util.WriteLines(out, kept); err != nil {
 		return err
 	}
 	e.Run.RecordOutputs("ports", out)
@@ -114,14 +120,6 @@ func Ports(ctx context.Context, e *Env) error {
 	}
 	if err := censysEnrich(ctx, e); err != nil {
 		logging.Debug("ports: censys enrichment: %v", err)
-	}
-	return nil
-}
-
-// writePortsOutputs writes the port-stage artifacts, always creating each one.
-func writePortsOutputs(portsPath string, pairs []string) error {
-	if err := util.WriteLines(portsPath, pairs); err != nil {
-		return err
 	}
 	return nil
 }
@@ -146,7 +144,6 @@ func parseHostPorts(lines []string) []hostPort {
 	for _, line := range lines {
 		host, port := util.HostPortSplit(line)
 		if host == "" || port == "" {
-			// A host with no port cannot be scanned.
 			continue
 		}
 		hp := hostPort{host: host, port: port}
@@ -246,16 +243,13 @@ func nmapServiceDetect(ctx context.Context, e *Env) error {
 	e.Run.RecordOutputs("ports", e.Paths.OpenPorts(), out)
 
 	if scanned == 0 {
-		return fmt.Errorf("no hosts were service-detected")
+		return errors.New("no hosts were service-detected")
 	}
 	logging.Ok("nmap: version scan complete for %d host(s)", scanned)
 	return nil
 }
 
-// censysEnrich performs a passive service lookup.
-//
-// Rate limited by design: the free tier allows only a handful of requests per
-// second, and being explicit about that is better than getting rate limited.
+// censysEnrich performs a passive service lookup, one request per censysTick.
 func censysEnrich(ctx context.Context, e *Env) error {
 	if !e.Opts.Censys {
 		return nil
@@ -266,7 +260,6 @@ func censysEnrich(ctx context.Context, e *Env) error {
 		return nil
 	}
 
-	// Addresses first, falling back to the resolved host list.
 	ips, ok := util.ReadLines(e.Paths.Addresses())
 	if !ok || len(ips) == 0 {
 		ips, _ = util.ReadLines(e.Paths.Resolved())
@@ -296,11 +289,10 @@ func censysEnrich(ctx context.Context, e *Env) error {
 		records = append(records, parseCensysServices(ip, body)...)
 		lookedUp++
 
-		// The free tier is one request per second. Respect it explicitly.
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-newTicker().C:
+		case <-time.After(censysTick):
 		}
 	}
 

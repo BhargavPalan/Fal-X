@@ -30,9 +30,12 @@ type Options struct {
 	// postgres://user:pass@localhost:5432/falx?sslmode=disable
 	DSN string
 
-	// OrgID is written to the falx.org_id GUC on every connection, which is
-	// what the row-level security policies read. Zero means no tenancy filter,
-	// which is only appropriate for migrations and the auditor role.
+	// OrgID is the tenant every InTx call runs as. It is applied inside each
+	// transaction, never on the shared pool: a session-level setting lives on one
+	// physical connection, and the pool hands connections to whoever asks, so a
+	// tenant's queries could run as another tenant or as none. Zero means no
+	// tenancy filter, which is only appropriate for migrations and the auditor
+	// role.
 	OrgID int64
 
 	MaxOpenConns    int
@@ -104,20 +107,15 @@ func Open(ctx context.Context, opts Options) (*DB, error) {
 	}
 
 	out := &DB{sql: db, opts: opts}
-	if opts.OrgID != 0 {
-		if err := out.setOrg(ctx, opts.OrgID); err != nil {
-			db.Close()
-			return nil, err
-		}
-	}
 	return out, nil
 }
 
 // SQL exposes the underlying handle for callers that need raw access.
+//
+// A statement run directly on it carries no tenant context, so row-level
+// security sees no org and returns nothing or rejects the write. Use InTx for
+// anything that touches tenant tables.
 func (d *DB) SQL() *sql.DB { return d.sql }
-
-// Opts returns the options the pool was opened with.
-func (d *DB) Opts() Options { return d.opts }
 
 // Close releases the pool.
 func (d *DB) Close() error {
@@ -127,43 +125,49 @@ func (d *DB) Close() error {
 	return d.sql.Close()
 }
 
-// setOrg writes the org_id GUC that the row-level security policies read.
-func (d *DB) setOrg(ctx context.Context, orgID int64) error {
-	// The value goes through set_config rather than SET so it is parameterised,
-	// which is what keeps it out of the SQL text. The explicit ::text cast is
-	// required: set_config's second argument is text, and without the cast the
-	// driver has no type to encode into and fails at execution time.
-	if _, err := d.sql.ExecContext(ctx,
-		"SELECT set_config('falx.org_id', $1::text, false)",
-		strconv.FormatInt(orgID, 10)); err != nil {
-		return fmt.Errorf("store: set org %d: %w", orgID, err)
+// InTx runs fn in a transaction that executes as the DB's tenant.
+//
+// The org id is written with a transaction-local set_config, so it exists only
+// for this transaction and cannot outlive it on a pooled connection. The value
+// goes through set_config rather than SET so it is parameterised, which keeps it
+// out of the SQL text. The explicit ::text cast is required: set_config's second
+// argument is text, and without it the driver has no type to encode into.
+//
+// fn's error rolls the transaction back and is returned unchanged.
+func (d *DB) InTx(ctx context.Context, fn func(*sql.Tx) error) error {
+	tx, err := d.sql.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("store: begin: %w", err)
+	}
+	if d.opts.OrgID != 0 {
+		if _, err := tx.ExecContext(ctx,
+			"SELECT set_config('falx.org_id', $1::text, true)",
+			strconv.FormatInt(d.opts.OrgID, 10)); err != nil {
+			_ = tx.Rollback()
+			return fmt.Errorf("store: set org %d: %w", d.opts.OrgID, err)
+		}
+	}
+	if err := fn(tx); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("store: commit: %w", err)
 	}
 	return nil
 }
 
 // WithOrg returns a shallow copy bound to a different tenant. The pool is
-// shared; only the GUC changes.
+// shared and nothing is sent to the database: the tenant is applied per
+// transaction by InTx.
 //
 // Callers must pass the org id through from an authenticated session. Treating
 // it as user input is the whole vulnerability.
-func (d *DB) WithOrg(ctx context.Context, orgID int64) (*DB, error) {
+func (d *DB) WithOrg(_ context.Context, orgID int64) (*DB, error) {
 	clone := &DB{sql: d.sql, opts: d.opts}
 	clone.opts.OrgID = orgID
-	if err := clone.setOrg(ctx, orgID); err != nil {
-		return nil, err
-	}
 	return clone, nil
 }
-
-// Ping verifies the connection still works.
-func (d *DB) Ping(ctx context.Context) error {
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-	return d.sql.PingContext(ctx)
-}
-
-// Stats reports pool statistics, for the health endpoint.
-func (d *DB) Stats() sql.DBStats { return d.sql.Stats() }
 
 // DSNFromEnv reads a connection string from the environment, returning empty
 // when unset so callers can decide whether that is an error.

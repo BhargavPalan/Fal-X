@@ -24,31 +24,6 @@ import (
 // pairs are real, so no stage may assume a peer's output exists.
 var AllStages = []string{"roots", "subs", "resolve", "ports", "http", "content", "scan"}
 
-// Refusal classifies why a run will not proceed.
-//
-// The classification is derived from the error types in internal/logging rather
-// than being a parallel type. Two representations of the same three-way split
-// would be one more thing to keep in step, and the exit-status contract has to
-// mean the same thing wherever an error is produced.
-type Refusal = logging.Refusal
-
-const (
-	// RefuseNone means no refusal.
-	RefuseNone = logging.RefuseNone
-	// RefuseUsage is a bad flag, malformed input, or contradictory modes.
-	// Exit status 2.
-	RefuseUsage = logging.RefuseUsage
-	// RefuseScope is a missing authorization or an unusable scope. Exit
-	// status 3.
-	RefuseScope = logging.RefuseScope
-)
-
-// RefusalKind reports how err should be classified.
-func RefusalKind(err error) Refusal { return logging.RefusalOf(err) }
-
-// StatusFor maps an error onto the exit-status contract.
-func StatusFor(err error) int { return logging.ExitFor(err) }
-
 // usageErr builds a usage refusal, exit status 2.
 func usageErr(format string, a ...any) error { return logging.Usagef(format, a...) }
 
@@ -149,12 +124,16 @@ type Options struct {
 // boolFlags are the switches. They are listed so that --switch=value can be
 // rejected rather than silently reduced to the bare switch, which would turn
 // --dry-run=false into --dry-run and run a scan the operator asked to skip.
+//
+// Every spelling the switch accepts belongs here, short forms included: -q=false
+// must be refused exactly as --quiet=false is. flaglist_test.go reads the switch
+// and fails if the two ever drift apart.
 var boolFlags = map[string]bool{
 	"--yes": true, "-y": true, "--allow-private": true, "--allow-any": true,
 	"--dry-run": true, "--skip-scan": true, "--fast": true, "--brute": true,
 	"--deep": true, "--nmap": true, "--dirs": true, "--censys": true,
-	"--verbose": true, "--new": true, "--quiet": true, "--debug": true,
-	"--json": true,
+	"--verbose": true, "-v": true, "--new": true, "--quiet": true, "-q": true,
+	"--debug": true, "--json": true,
 }
 
 // Parse reads args into an Options, rejecting anything malformed.

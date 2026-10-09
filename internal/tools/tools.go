@@ -18,14 +18,13 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/BhargavPalan/Fal-X/internal/util"
 )
 
-// Errors this package returns.
-//
 // ErrNotFound is distinct from a non-zero exit so a stage can report a missing
-// tool differently from a tool that ran and failed. The run manifest keeps those
-// apart, because "nuclei is not installed" and "nuclei found nothing" are very
-// different things to read in a report.
+// tool differently from a tool that ran and failed: "nuclei is not installed" and
+// "nuclei found nothing" are very different things to read in a report.
 var (
 	// ErrNotFound means the binary is not on PATH.
 	ErrNotFound = errors.New("tool not found")
@@ -46,7 +45,7 @@ func (e *ExitError) Error() string {
 	if s := strings.TrimSpace(e.Stderr); s != "" {
 		// Bounded: a tool can emit megabytes of stderr, and this string ends up
 		// in a log line and possibly a report.
-		msg += ": " + truncate(s, 400)
+		msg += ": " + util.Truncate(s, 400)
 	}
 	return msg
 }
@@ -101,8 +100,7 @@ func New() *Exec {
 
 // Run executes name with args and returns its output.
 //
-// There is no shell anywhere in this path. Arguments reach the child exactly as
-// given, which is what makes a value containing a space safe.
+// Arguments reach the child exactly as given, with no shell in between.
 func (e *Exec) Run(ctx context.Context, name string, args ...string) (Result, error) {
 	path, err := Resolve(name)
 	if err != nil {
@@ -140,11 +138,8 @@ func (e *Exec) Run(ctx context.Context, name string, args ...string) (Result, er
 			ErrOutputTooLarge, name, e.MaxOutputBytes)
 	}
 
-	// A cancelled context is a caller decision, not a tool failure, and must not
-	// be reported as one.
-	if ctxErr := ctx.Err(); errors.Is(ctxErr, context.Canceled) {
-		return Result{}, fmt.Errorf("%s: %w", name, ctxErr)
-	} else if errors.Is(ctxErr, context.DeadlineExceeded) {
+	// A cancelled or expired context is a caller decision, not a tool failure.
+	if ctxErr := ctx.Err(); ctxErr != nil {
 		return Result{}, fmt.Errorf("%s: %w", name, ctxErr)
 	}
 
@@ -171,7 +166,7 @@ func (e *Exec) Run(ctx context.Context, name string, args ...string) (Result, er
 }
 
 // Available reports whether a tool is on PATH.
-func (e *Exec) Available(name string) bool {
+func (*Exec) Available(name string) bool {
 	_, err := Resolve(name)
 	return err == nil
 }
@@ -260,12 +255,4 @@ func (c *cappedBuffer) String() string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.buf.String()
-}
-
-// truncate shortens s to n characters.
-func truncate(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n] + "..."
 }

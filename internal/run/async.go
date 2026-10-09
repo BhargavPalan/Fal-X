@@ -22,18 +22,17 @@ type StageHandle struct {
 	seq   int
 	done  chan struct{}
 
-	mu   sync.Mutex
-	err  error
-	dur  int64
-	ins  int
-	code int
+	mu  sync.Mutex
+	err error
+	dur int64
+	ins int
 }
 
 // StageAsync starts fn in the background and returns a handle to join it.
 //
 // The two real concurrent pairs in the pipeline are ports|http and content|scan.
 // Neither may assume the other's output exists.
-func (r *Run) StageAsync(name string, fn func() error) (*StageHandle, error) {
+func (r *Run) StageAsync(name string, fn func() error) *StageHandle {
 	r.mu.Lock()
 	ins := r.inputs
 	r.inputs = 0
@@ -52,7 +51,6 @@ func (r *Run) StageAsync(name string, fn func() error) (*StageHandle, error) {
 			if rec := recover(); rec != nil {
 				h.mu.Lock()
 				h.err = fmt.Errorf("stage %s panicked: %v", name, rec)
-				h.code = 1
 				h.mu.Unlock()
 			}
 		}()
@@ -65,19 +63,15 @@ func (r *Run) StageAsync(name string, fn func() error) (*StageHandle, error) {
 		h.err = err
 		h.dur = int64(dur.Seconds())
 		h.ins = ins
-		h.code = exitCodeFor(err)
 		h.mu.Unlock()
 	}()
 
-	return h, nil
+	return h
 }
 
 // Wait blocks until the stage finishes, records its outcome, and returns the
-// stage's error.
-//
-// The record is made here, in the parent, which is the only place the shared
-// stage list can be safely updated. A stage that returned ErrSkip is recorded as
-// skipped and reports success, matching Stage.
+// stage's error. A stage that returned ErrSkip is recorded as skipped and reports
+// success, matching Stage.
 func (h *StageHandle) Wait() error {
 	<-h.done
 

@@ -26,6 +26,7 @@ import (
 	"strings"
 
 	"github.com/BhargavPalan/Fal-X/internal/run"
+	"github.com/BhargavPalan/Fal-X/internal/util"
 )
 
 // SchemaVersion is the version of the JSON report format.
@@ -82,9 +83,12 @@ type Model struct {
 	RunID          string            `json:"run_id"`
 	Target         string            `json:"target"`
 	Profile        string            `json:"profile,omitempty"`
+	Mode           string            `json:"mode,omitempty"`
 	StartedAt      string            `json:"started_at"`
 	ElapsedSeconds int64             `json:"elapsed_seconds"`
 	DryRun         bool              `json:"dry_run"`
+	AllowPrivate   bool              `json:"allow_private"`
+	AllowAny       bool              `json:"allow_any"`
 	ScopeAllowlist string            `json:"scope_allowlist,omitempty"`
 	ScopeDenylist  string            `json:"scope_denylist,omitempty"`
 	ScopeDigest    string            `json:"scope_fingerprint,omitempty"`
@@ -94,6 +98,7 @@ type Model struct {
 
 	Subdomains Artifact[string]  `json:"subdomains"`
 	Resolved   Artifact[string]  `json:"resolved"`
+	Addresses  Artifact[string]  `json:"addresses"`
 	OpenPorts  Artifact[string]  `json:"open_ports"`
 	Services   Artifact[Service] `json:"services"`
 	URLs       Artifact[string]  `json:"urls"`
@@ -103,12 +108,12 @@ type Model struct {
 
 // The artifact locations inside a run directory. They mirror the methods on
 // stage.Paths; this package does not import internal/stage because that would
-// drag the whole pipeline into a renderer. internal/report's tests build a run
-// from these same names, so a rename in stage.Paths that is not mirrored here
-// shows up as an empty report rather than going unnoticed.
+// drag the whole pipeline into a renderer. paths_test.go compares the two, so a
+// rename in stage.Paths that is not mirrored here fails a test.
 var (
 	fileSubdomains = filepath.Join("2-subs", "subdomains.txt")
 	fileResolved   = filepath.Join("3-resolve", "resolved.txt")
+	fileAddresses  = filepath.Join("3-resolve", "ips.txt")
 	fileOpenPorts  = filepath.Join("4-ports", "open.txt")
 	fileProbe      = filepath.Join("5-http", "probe.json")
 	fileURLs       = filepath.Join("6-content", "urls.txt")
@@ -128,9 +133,12 @@ func Load(dir string) (*Model, error) {
 		RunID:          man.RunID,
 		Target:         man.Target,
 		Profile:        man.Profile,
+		Mode:           man.Mode,
 		StartedAt:      man.StartedAt,
 		ElapsedSeconds: man.Elapsed,
 		DryRun:         man.DryRun,
+		AllowPrivate:   man.AllowPrivate,
+		AllowAny:       man.AllowAny,
 		ScopeAllowlist: man.ScopeAllowlist,
 		ScopeDenylist:  man.ScopeDenylist,
 		ScopeDigest:    man.ScopeFinger,
@@ -148,6 +156,9 @@ func Load(dir string) (*Model, error) {
 		return nil, err
 	}
 	if m.Resolved, err = lines(dir, fileResolved); err != nil {
+		return nil, err
+	}
+	if m.Addresses, err = lines(dir, fileAddresses); err != nil {
 		return nil, err
 	}
 	if m.OpenPorts, err = lines(dir, fileOpenPorts); err != nil {
@@ -170,8 +181,18 @@ func Load(dir string) (*Model, error) {
 
 // readLines reads a text artifact. A missing file is reported as absent, not as
 // an error, because "the stage never ran" is a normal state for a report.
+//
+// The artifact path is fixed, but a run directory is a shareable bundle that can
+// arrive from somewhere else, so each one is resolved before it is opened. A
+// symlink standing where an artifact belongs would otherwise read a file from
+// anywhere on the host the operator can read and place its contents in a report
+// meant to be handed to someone else.
 func readLines(dir, rel string) (items []string, present bool, err error) {
-	f, err := os.Open(filepath.Join(dir, rel)) //nolint:gosec // a path inside the chosen run directory
+	path, err := artifactPath(dir, rel)
+	if err != nil {
+		return nil, false, err
+	}
+	f, err := os.Open(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, false, nil
 	}
@@ -196,6 +217,17 @@ func readLines(dir, rel string) (items []string, present bool, err error) {
 func lines(dir, rel string) (Artifact[string], error) {
 	items, present, err := readLines(dir, rel)
 	return Artifact[string]{Present: present, Items: items}, err
+}
+
+// artifactPath resolves rel inside dir and refuses anything that leaves the run
+// directory. The check lives in util.ResolveWithin so every reader of a run bundle
+// shares one implementation.
+func artifactPath(dir, rel string) (string, error) {
+	p, err := util.ResolveWithin(dir, rel)
+	if err != nil {
+		return "", fmt.Errorf("report: %w", err)
+	}
+	return p, nil
 }
 
 // probeRecord is the subset of an httpx record the report reads. httpx emits far

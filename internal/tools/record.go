@@ -13,23 +13,18 @@ type Invocation struct {
 	Args []string
 	// Code is the tool's exit status, or -1 when it did not run.
 	Code int
-	// Duration is how long it took.
-	Duration string
 }
 
 // Line renders the invocation as a single string.
 //
-// This is the form assertions and log lines read. An argument containing a
-// space stays intact as one argument in the Args slice; Line is for humans.
+// It is for people and assertions: an argument containing a space stays one
+// argument in Args.
 func (i Invocation) Line() string { return i.Name + " " + strings.Join(i.Args, " ") }
 
 // Recording wraps a Runner and remembers what it was asked to run.
 //
-// The manifest records which external tools a run used and what they returned,
-// because a finding is only reproducible if you know which scanner produced it
-// and with which flags. A tool that was missing is recorded too: "nuclei is not
-// installed" and "nuclei found nothing" are very different things to read in a
-// report.
+// A finding is only reproducible if you know which scanner produced it and with
+// which flags, so the manifest records every call.
 type Recording struct {
 	Inner Runner
 

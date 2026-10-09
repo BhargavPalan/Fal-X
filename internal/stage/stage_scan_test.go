@@ -240,7 +240,7 @@ func TestScanGatesBeforeRunningTemplates(t *testing.T) {
 	h.fx.on("nuclei", []string{
 		"-silent", "-l", gated, "-severity", "low,medium,high,critical",
 		"-c", "10", "-rl", "300", "-no-color",
-	}, "[https://example.com] [200] [low] tech-detect - nginx\n")
+	}, "[tech-detect] [http] [low] https://example.com\n")
 
 	if err := h.runStage("scan", Scan); err != nil {
 		t.Fatalf("Scan: %v", err)
@@ -268,9 +268,9 @@ func TestScanDropsFindingsNamingAnOutOfScopeHost(t *testing.T) {
 		"-silent", "-l", gated, "-severity", "low,medium,high,critical",
 		"-c", "10", "-rl", "300", "-no-color",
 	}, strings.Join([]string{
-		"[https://example.com] [200] [low] x - in scope finding",
-		"[https://attacker.test] [200] [critical] y - out of scope finding",
-		"[2001:db8::1]:8443] [200] [high] z - ipv6 finding",
+		"[x] [http] [low] https://example.com/in-scope",
+		"[y] [http] [critical] https://attacker.test/out-of-scope",
+		"[z] [tcp] [high] [2001:db8::1]:8443",
 		"",
 	}, "\n"))
 
@@ -372,5 +372,41 @@ func TestContentGatesCrawledResults(t *testing.T) {
 	}
 	if !strings.Contains(urls, "https://api.example.com/v1") {
 		t.Errorf("urls = %q, want the in-scope subdomain", urls)
+	}
+}
+
+// TestScanKeepsFindingsInNucleisRealFormat pins the format nuclei actually prints:
+// "[template] [protocol] [severity] target". The host is the target, not the
+// template id, and a finding is kept or dropped on that host alone.
+func TestScanKeepsFindingsInNucleisRealFormat(t *testing.T) {
+	h := newHarness(t, "example.com\n", "")
+	h.seed(h.paths.HTTPHosts(), "https://example.com\n")
+
+	gated := filepath.Join(h.paths.ScanDir, "targets.scoped.txt")
+	h.fx.on("nuclei", []string{
+		"-silent", "-l", gated, "-severity", "low,medium,high,critical",
+		"-c", "10", "-rl", "300", "-no-color",
+	}, strings.Join([]string{
+		"[git-config] [http] [medium] https://example.com/.git/config",
+		"[ssh-weak:cipher] [javascript] [low] app.example.com:22",
+		"[git-config] [http] [high] https://attacker.test/.git/config",
+		"[ssh-weak] [tcp] [low] 192.0.2.10:22",
+		"[x] [http] [high] http://[2001:db8::1]:8080/p",
+		"[x] [http] [high] ",
+		"",
+	}, "\n"))
+
+	if err := h.runStage("scan", Scan); err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+
+	got := h.read(h.paths.Findings())
+	if len(got) != 2 {
+		t.Fatalf("findings = %q, want exactly the two in-scope lines", got)
+	}
+	for _, bad := range []string{"attacker.test", "192.0.2.10", "2001:db8::1"} {
+		if strings.Contains(strings.Join(got, "\n"), bad) {
+			t.Errorf("a finding for %s was kept", bad)
+		}
 	}
 }

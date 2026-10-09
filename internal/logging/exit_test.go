@@ -100,44 +100,6 @@ func TestErrorMessagesUnwrap(t *testing.T) {
 	}
 }
 
-// TestFatalErrUsesExitStatus confirms the single exit point maps errors to the
-// right status rather than always exiting 1.
-func TestFatalErrUsesExitStatus(t *testing.T) {
-	cases := []struct {
-		name string
-		err  error
-		want int
-	}{
-		{"nil", nil, 0},
-		{"runtime", errors.New("x"), StatusRuntime},
-		{"usage", Usagef("x"), StatusUsage},
-		{"scope", Scopef("x"), StatusScope},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			var got = -1
-			prev := exitFn
-			SetExitFunc(func(code int) { got = code })
-			t.Cleanup(func() { SetExitFunc(prev) })
-
-			FatalErr(tc.err)
-
-			want := tc.want
-			if tc.err == nil {
-				// Nothing to report, so nothing must exit.
-				if got != -1 {
-					t.Errorf("FatalErr(nil) exited with %d, want no exit", got)
-				}
-				return
-			}
-			if got != want {
-				t.Errorf("FatalErr exited with %d, want %d", got, want)
-			}
-		})
-	}
-}
-
 // TestErrorMessagesSurviveEmptyCause covers the nil-Err path, which exists
 // because a bare ErrScope{} is a valid way to say "unauthorized".
 func TestErrorMessagesSurviveEmptyCause(t *testing.T) {

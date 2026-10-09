@@ -38,12 +38,7 @@ func TestToolsAreWellFormed(t *testing.T) {
 // TestSetupIsIdempotentAndNeverOverwrites checks that Setup creates scope.txt
 // once and then leaves an operator's file untouched on a second run.
 func TestSetupIsIdempotentAndNeverOverwrites(t *testing.T) {
-	dir := t.TempDir()
-	cwd, _ := os.Getwd()
-	t.Cleanup(func() { _ = os.Chdir(cwd) })
-	if err := os.Chdir(dir); err != nil {
-		t.Fatal(err)
-	}
+	t.Chdir(t.TempDir())
 
 	var buf bytes.Buffer
 	if err := Setup(&buf); err != nil {

@@ -84,9 +84,6 @@ func (p Paths) NetblocksFile() string { return filepath.Join(p.ResolveDir, "netb
 // Roots is the root-domain list.
 func (p Paths) Roots() string { return filepath.Join(p.RootsDir, "roots.txt") }
 
-// Candidates is the subdomain candidate list.
-func (p Paths) Candidates() string { return filepath.Join(p.SubsDir, "candidates.txt") }
-
 // Subs is the enumerated in-scope subdomain list.
 func (p Paths) Subs() string { return filepath.Join(p.SubsDir, "subdomains.txt") }
 
@@ -103,9 +100,6 @@ func (p Paths) Addresses() string { return filepath.Join(p.ResolveDir, "ips.txt"
 
 // Records is the DNS record dump.
 func (p Paths) Records() string { return filepath.Join(p.ResolveDir, "dns.txt") }
-
-// HostPorts is the host:port list from the port stage.
-func (p Paths) HostPorts() string { return filepath.Join(p.PortsDir, "hosts.txt") }
 
 // OpenPorts is the list of open services.
 func (p Paths) OpenPorts() string { return filepath.Join(p.PortsDir, "open.txt") }
@@ -138,43 +132,26 @@ type Env struct {
 type Stage struct {
 	Name string
 	Fn   func(ctx context.Context, e *Env) error
-	// NeedsTool names a binary the stage cannot work without. The pipeline
-	// reports it as missing rather than failing obscurely mid-run.
-	NeedsTool string
-	// Stage lists the tools the stage uses, for the missing-tools report.
+	// Tools are the binaries the stage cannot run without. A stage missing any of
+	// them is skipped, not failed: the operator installed what they wanted, and
+	// reporting that as an error makes a working setup look broken.
+	//
+	// Optional tools are left out and handled inside the stage, which degrades and
+	// records a note: amass only runs under --deep, puredns under --brute, and
+	// the whole content stage is katana, gau and ffuf.
 	Tools []string
 }
 
 // Stages is the pipeline in execution order.
 var Stages = []Stage{
-	// Tools lists what a stage cannot run without. A stage whose tools are all
-	// absent is skipped, not failed: the operator installed what they wanted,
-	// and reporting that as an error makes a working setup look broken.
-	//
-	// Optional tools are deliberately absent from these lists and are handled
-	// inside the stage, which degrades and records a note. amass only runs under
-	// --deep, puredns under --brute, and the whole content stage is katana, gau
-	// and ffuf, all of which are optional refinements.
-	{Name: "targets", Fn: Targets, Tools: nil},
+	{Name: "targets", Fn: Targets},
 	{Name: "roots", Fn: Roots, Tools: []string{"subfinder"}},
 	{Name: "subs", Fn: Subs, Tools: []string{"subfinder"}},
 	{Name: "resolve", Fn: Resolve, Tools: []string{"dnsx"}},
 	{Name: "ports", Fn: Ports, Tools: []string{"naabu"}},
 	{Name: "http", Fn: HTTP, Tools: []string{"httpx"}},
-	{Name: "content", Fn: Content, Tools: nil},
+	{Name: "content", Fn: Content},
 	{Name: "scan", Fn: Scan, Tools: []string{"nuclei"}},
-}
-
-// ConcurrentStages returns the stages that run as a pair.
-//
-// A stage in a concurrent pair has no ordering guarantee relative to its peer,
-// so it must not read the peer's output.
-func ConcurrentStages(name string) bool {
-	switch name {
-	case "ports", "http", "content", "scan":
-		return true
-	}
-	return false
 }
 
 // Run executes the enabled stages in order and reports whether the run is clean.
@@ -195,7 +172,7 @@ func ConcurrentStages(name string) bool {
 func Run(ctx context.Context, e *Env, enabled func(string) bool) error {
 	for _, group := range pipelineGroups(e.Opts.IPMode) {
 		if ctx.Err() != nil {
-			logging.Warn("interrupted before stage %s", group[0].name)
+			logging.Warn("interrupted before stage %s", group[0].Name)
 			break
 		}
 
@@ -204,18 +181,18 @@ func Run(ctx context.Context, e *Env, enabled func(string) bool) error {
 			// The targets stage is not a pipeline stage. It prepares the input
 			// for an address or ASN run and decides for itself whether it
 			// applies, so it is always considered enabled.
-			on := enabled(s.name) || s.name == "targets"
+			on := enabled(s.Name) || s.Name == "targets"
 
 			if !on {
-				e.Run.Skip(s.name, "not selected")
+				e.Run.Skip(s.Name, "not selected")
 				continue
 			}
 
-			if missing := e.Tools.Missing(s.tools...); len(missing) > 0 {
+			if missing := e.Tools.Missing(s.Tools...); len(missing) > 0 {
 				// Skipped rather than failed. Every tool this stage needs is
 				// absent, so there was nothing to do and nothing went wrong. The
 				// run still produces everything the installed tools can find.
-				e.Run.Skip(s.name, strings.Join(missing, ", ")+" not installed; "+
+				e.Run.Skip(s.Name, strings.Join(missing, ", ")+" not installed; "+
 					"install with: "+tools.InstallHint())
 				continue
 			}
@@ -224,17 +201,13 @@ func Run(ctx context.Context, e *Env, enabled func(string) bool) error {
 			// before the next stage starts. A multi-stage group is started in the
 			// background and joined below.
 			if len(group) == 1 {
-				if err := e.Run.Stage(s.name, func() error { return s.fn(ctx, e) }); err != nil {
-					logging.Debug("stage %s reported: %v", s.name, err)
+				if err := e.Run.Stage(s.Name, func() error { return s.Fn(ctx, e) }); err != nil {
+					logging.Debug("stage %s reported: %v", s.Name, err)
 				}
 				continue
 			}
 
-			h, err := e.Run.StageAsync(s.name, func() error { return s.fn(ctx, e) })
-			if err != nil {
-				return err
-			}
-			handles = append(handles, h)
+			handles = append(handles, e.Run.StageAsync(s.Name, func() error { return s.Fn(ctx, e) }))
 		}
 
 		// Joining is what records the concurrent stages. The record has to be
@@ -250,23 +223,16 @@ func Run(ctx context.Context, e *Env, enabled func(string) bool) error {
 	return e.Run.Finalise()
 }
 
-// stageEntry is one stage with the tools it uses.
-type stageEntry struct {
-	name  string
-	fn    func(context.Context, *Env) error
-	tools []string
-}
-
 // pipelineGroups returns the stages in groups, where a group runs concurrently.
 //
 // The mode split is the important part. See Run.
-func pipelineGroups(ipMode bool) [][]stageEntry {
-	byName := make(map[string]stageEntry, len(Stages))
+func pipelineGroups(ipMode bool) [][]Stage {
+	byName := make(map[string]Stage, len(Stages))
 	for _, s := range Stages {
-		byName[s.Name] = stageEntry{name: s.Name, fn: s.Fn, tools: s.Tools}
+		byName[s.Name] = s
 	}
-	get := func(names ...string) []stageEntry {
-		out := make([]stageEntry, 0, len(names))
+	get := func(names ...string) []Stage {
+		out := make([]Stage, 0, len(names))
 		for _, n := range names {
 			out = append(out, byName[n])
 		}
@@ -275,7 +241,7 @@ func pipelineGroups(ipMode bool) [][]stageEntry {
 
 	if ipMode {
 		// targets -> ports -> http, then content and scan together.
-		return [][]stageEntry{
+		return [][]Stage{
 			get("targets"),
 			get("roots", "subs", "resolve"),
 			get("ports"),
@@ -284,7 +250,7 @@ func pipelineGroups(ipMode bool) [][]stageEntry {
 		}
 	}
 
-	return [][]stageEntry{
+	return [][]Stage{
 		get("targets"),
 		get("roots"),
 		get("subs"),

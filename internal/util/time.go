@@ -41,3 +41,13 @@ func ISOStamp(t time.Time) string {
 func RunStamp(t time.Time) string {
 	return t.UTC().Format("20060102-150405")
 }
+
+// DateOnly is the calendar-date layout, used wherever a feed publishes a plain
+// date: a CISA date_added, an EPSS score_date, an NVD published date.
+const DateOnly = "2006-01-02"
+
+// FormatDate renders t as a plain calendar date.
+func FormatDate(t time.Time) string { return t.Format(DateOnly) }
+
+// ParseDate reads a plain calendar date.
+func ParseDate(s string) (time.Time, error) { return time.Parse(DateOnly, s) }

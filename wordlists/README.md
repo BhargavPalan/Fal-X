@@ -4,8 +4,8 @@ Files here are data, not code, and they carry their upstream licences.
 
 | File | Entries | Source | Licence |
 |---|---|---|---|
-| `subdomains.txt` | 20,000 | SecLists `Discovery/DNS/subdomains-top1million-20000.txt` | MIT |
-| `content.txt` | 4,751 | SecLists `Discovery/Web-Content/common.txt` | MIT |
+| `subdomains.txt` | about 20,000 | SecLists `Discovery/DNS/subdomains-top1million-20000.txt` | MIT |
+| `content.txt` | about 4,750 | SecLists `Discovery/Web-Content/common.txt` | MIT |
 | `resolvers.txt` | 26 | curated list of well-known public recursive resolvers | factual data |
 
 `resolvers.txt` was written for this project. The addresses are published
@@ -17,6 +17,11 @@ The other two are fetched, not committed (`wordlists/*.txt` is gitignored). They
 are unmodified apart from line endings, blank lines and duplicates.
 
 ## Fetching and updating
+
+Counts are what a fetch produced at the time of writing (20,000 and 4,751);
+upstream edits the lists, and a copy fetched earlier or filtered by hand will
+differ. `fal-x wordlists list` shows what you actually have, and
+`fal-x wordlists fetch --force content` refreshes one.
 
 ```
 fal-x wordlists list              # show sources and what is present locally

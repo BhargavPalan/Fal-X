@@ -2,9 +2,7 @@ package store
 
 import (
 	"crypto/sha256"
-	"database/sql"
 	"encoding/hex"
-	"errors"
 	"strings"
 )
 
@@ -19,6 +17,3 @@ func checksum(body string) string {
 	sum := sha256.Sum256([]byte(strings.Join(lines, "\n")))
 	return hex.EncodeToString(sum[:])
 }
-
-// isNoRows reports whether err is sql.ErrNoRows.
-func isNoRows(err error) bool { return errors.Is(err, sql.ErrNoRows) }

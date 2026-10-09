@@ -64,7 +64,6 @@ func sortedAddrs(in []netip.Addr) []string {
 	return out
 }
 
-// sortedPrefixes returns the sorted string form of a set of prefixes.
 func sortedPrefixes(in []netip.Prefix) []string {
 	if len(in) == 0 {
 		return nil
@@ -88,7 +87,6 @@ func sortedCopy(in []string) []string {
 	return out
 }
 
-// sortedKeys returns the sorted keys of a port or prefix map.
 func sortedKeys[V any](m map[string]V) []string {
 	if len(m) == 0 {
 		return nil

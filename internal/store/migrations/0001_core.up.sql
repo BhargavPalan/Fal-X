@@ -1,5 +1,5 @@
--- Fal-X core schema. Phase 0 covers run bookkeeping and the asset inventory.
--- Vulnerability data arrives with the intelligence core in a later phase.
+-- Fal-X core schema: run bookkeeping and the asset inventory.
+-- Vulnerability data arrives in later migrations.
 --
 -- Conventions:
 --   * Timestamps are timestamptz in UTC. The caller is responsible for the

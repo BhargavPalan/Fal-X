@@ -307,19 +307,13 @@ func TestConcurrentStagesAreJoined(t *testing.T) {
 	r := newTestRun(t)
 
 	// The two real concurrent pairs are ports|http and content|scan.
-	portsDone, err := r.StageAsync("ports", func() error {
+	portsDone := r.StageAsync("ports", func() error {
 		time.Sleep(10 * time.Millisecond)
 		return nil
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	httpDone, err := r.StageAsync("http", func() error {
+	httpDone := r.StageAsync("http", func() error {
 		return errors.New("probe failed")
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 
 	if err := portsDone.Wait(); err != nil {
 		t.Errorf("ports stage reported %v, want nil", err)
@@ -353,12 +347,9 @@ func TestConcurrentStagesAreJoined(t *testing.T) {
 func TestStageAsyncRecordsPanicAsFailure(t *testing.T) {
 	r := newTestRun(t)
 
-	done, err := r.StageAsync("scan", func() error {
+	done := r.StageAsync("scan", func() error {
 		panic("tool exploded")
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if err := done.Wait(); err == nil {
 		t.Error("Wait returned nil for a panicking stage")
 	}
@@ -471,5 +462,24 @@ func TestSummaryLine(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Errorf("SummaryLine %q does not mention %q", got, want)
 		}
+	}
+}
+
+// TestManifestRecordsWhenTheRunEnded pins that run.json carries ended_at once the run
+// is finalised. The field was declared and never filled in.
+func TestManifestRecordsWhenTheRunEnded(t *testing.T) {
+	r := newTestRun(t)
+	if err := r.Finalise(); err != nil {
+		t.Fatal(err)
+	}
+	m, _, err := Load(r.Dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.EndedAt == "" {
+		t.Error("run.json has no ended_at after Finalise")
+	}
+	if m.EndedAt < m.StartedAt {
+		t.Errorf("ended_at %q is before started_at %q", m.EndedAt, m.StartedAt)
 	}
 }

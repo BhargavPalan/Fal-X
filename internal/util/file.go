@@ -27,38 +27,6 @@ func newLineScanner(f *os.File) *bufio.Scanner {
 	return sc
 }
 
-// Count returns the number of non-empty lines in path.
-//
-// An absent file is 0. So is a file holding only blank lines. Callers use this
-// to tell "the stage ran and found nothing" from "the stage never ran", which
-// is why an empty result must be a single zero rather than a zero with an error
-// path beside it.
-func Count(path string) int {
-	f, err := os.Open(path)
-	if err != nil {
-		return 0
-	}
-	defer f.Close()
-
-	n := 0
-	sc := newLineScanner(f)
-	for sc.Scan() {
-		if strings.TrimSpace(sc.Text()) != "" {
-			n++
-		}
-	}
-	return n
-}
-
-// FileSizeBytes returns the size of path in bytes, or 0 when it is absent.
-func FileSizeBytes(path string) int64 {
-	fi, err := os.Stat(path)
-	if err != nil {
-		return 0
-	}
-	return fi.Size()
-}
-
 // TruncateFile creates path empty, creating parent directories as needed.
 //
 // Modules call this before they know the directory exists, which is why it
@@ -150,30 +118,6 @@ func Clean(path string) error {
 	return WriteLines(path, uniq)
 }
 
-// DedupeInto concatenates the named files into out, sorted and deduped.
-// Absent inputs are skipped.
-func DedupeInto(out string, ins ...string) error {
-	seen := make(map[string]struct{})
-	uniq := make([]string, 0)
-
-	for _, in := range ins {
-		lines, ok := ReadLines(in)
-		if !ok {
-			continue
-		}
-		for _, l := range lines {
-			if _, dup := seen[l]; dup {
-				continue
-			}
-			seen[l] = struct{}{}
-			uniq = append(uniq, l)
-		}
-	}
-
-	sort.Strings(uniq)
-	return WriteLines(out, uniq)
-}
-
 // ReadLines returns the non-blank lines of path.
 //
 // It reports false when the file is absent or holds nothing, which callers use
@@ -203,46 +147,7 @@ func ReadLines(path string) ([]string, bool) {
 }
 
 // SHA256String returns the hex sha256 of s.
-func SHA256String(s string) (string, error) {
+func SHA256String(s string) string {
 	sum := sha256.Sum256([]byte(s))
-	return hex.EncodeToString(sum[:]), nil
-}
-
-// SHA256File returns the hex sha256 of a file's contents.
-func SHA256File(path string) (string, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return "", fmt.Errorf("util: hash %s: %w", path, err)
-	}
-	defer f.Close()
-
-	h := sha256.New()
-	if _, err := copyBuffered(h, f); err != nil {
-		return "", fmt.Errorf("util: hash %s: %w", path, err)
-	}
-	return hex.EncodeToString(h.Sum(nil)), nil
-}
-
-// Fingerprint returns a stable digest over the contents of the named files,
-// used to decide whether a cached stage result can be reused.
-//
-// A missing file contributes a distinct marker rather than nothing. If absent
-// contributed nothing, deleting a stage input would look like an unchanged run
-// and a stale result would be reused.
-func Fingerprint(paths ...string) (string, error) {
-	h := sha256.New()
-	for _, p := range paths {
-		digest, err := SHA256File(p)
-		if err != nil {
-			if !os.IsNotExist(err) {
-				// Unreadable for a reason other than absence is worth
-				// reporting, but it still cannot be hashed.
-				digest = "unreadable"
-			} else {
-				digest = "absent"
-			}
-		}
-		h.Write([]byte(digest))
-	}
-	return hex.EncodeToString(h.Sum(nil)), nil
+	return hex.EncodeToString(sum[:])
 }

@@ -144,7 +144,14 @@ func TestRunHonoursContext(t *testing.T) {
 
 	dir := t.TempDir()
 	script := filepath.Join(dir, "sleep")
-	if err := os.WriteFile(script, []byte("#!/bin/sh\nsleep 30\n"), 0o700); err != nil {
+	// The wrapper starts "sleep 30" and records that grandchild's own PID, so the
+	// check below is about this process and no other. A machine-wide search for
+	// "sleep" fails on any host with an unrelated sleep running (a keepalive, a
+	// cron job), which made this test fail for reasons that had nothing to do with
+	// the code under test.
+	pidFile := filepath.Join(dir, "child.pid")
+	body := "#!/bin/sh\nsleep 30 &\necho $! > '" + pidFile + "'\nwait\n"
+	if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
 		t.Fatal(err)
 	}
 
@@ -162,22 +169,28 @@ func TestRunHonoursContext(t *testing.T) {
 	// The tool's own child must be gone too. exec.CommandContext kills only the
 	// direct child, so a wrapper script would otherwise leave "sleep 30" running
 	// and holding the output pipe open.
+	raw, err := os.ReadFile(pidFile)
+	pid := string(bytes.TrimSpace(raw))
+	if err != nil || pid == "" {
+		t.Fatalf("the wrapper never recorded its child's PID (%v); cannot check it was killed", err)
+	}
+
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		if !processAlive("sleep") {
+		if !processAlive(pid) {
 			return
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	t.Error("the tool's grandchild process survived cancellation")
+	t.Errorf("the tool's grandchild process (PID %s) survived cancellation", pid)
 }
 
-// processAlive reports whether any process with the given name is running.
-func processAlive(name string) bool {
-	// pgrep is used rather than a platform API because this is a Unix-only
-	// concern; the whole check is skipped where it does not exist.
-	out, err := exec.CommandContext(context.Background(), "pgrep", "-x", name).Output()
-	return err == nil && len(bytes.TrimSpace(out)) > 0
+// processAlive reports whether the process with this PID is running.
+func processAlive(pid string) bool {
+	// kill -0 sends no signal; it only reports whether the PID exists. A shell
+	// builtin is used rather than a platform API because this is a Unix-only
+	// concern; the whole test is skipped where there is no POSIX shell.
+	return exec.CommandContext(context.Background(), "sh", "-c", "kill -0 "+pid).Run() == nil
 }
 
 // TestOutputIsCapped pins that a runaway tool cannot exhaust memory.
@@ -297,5 +310,34 @@ func TestResolveSkipsShadowingHTTPX(t *testing.T) {
 	t.Setenv("PATH", dir)
 	if _, err := Resolve("httpx"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("a non-ProjectDiscovery httpx resolved: %v", err)
+	}
+}
+
+func TestParseVersion(t *testing.T) {
+	cases := map[string]string{
+		"[\x1b[34mINF\x1b[0m] Nuclei Engine Version: v3.11.1":     "v3.11.1",
+		"[INF] Current Version: 2.3.3":                            "v2.3.3",
+		"[INF] Current version: v1.1.2":                           "v1.1.2",
+		"gau version: 2.2.4":                                      "v2.2.4",
+		"ffuf version: 2.1.0-dev":                                 "v2.1.0-dev",
+		"[INF] Current Version: v1.12.0\n[INF] templates v10.3.1": "v1.12.0",
+		"Usage: httpx [OPTIONS] URL\nError: No such option: -s":   "",
+		"":            "",
+		"version 3.4": "", // two parts is not a version we trust
+	}
+	for in, want := range cases {
+		if got := ParseVersion(in); got != want {
+			t.Errorf("ParseVersion(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestVersionOfAnAbsentToolIsEmptyNotAnError(t *testing.T) {
+	e := New()
+	if v := e.Version(context.Background(), "falx-definitely-not-installed"); v != "" {
+		t.Errorf("absent tool reported version %q", v)
+	}
+	if got := e.Versions(context.Background(), []string{"falx-definitely-not-installed"}); len(got) != 0 {
+		t.Errorf("Versions returned %v for an absent tool", got)
 	}
 }

@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -80,7 +79,7 @@ func runReport(_ context.Context, args []string) error {
 
 // outputPath decides where one rendered format is written.
 func outputPath(out, runDir string, f report.Format, several bool) string {
-	name := fmt.Sprintf("report.%s", f.Extension())
+	name := "report." + f.Extension()
 	switch {
 	case out == "":
 		return filepath.Join(runDir, name)

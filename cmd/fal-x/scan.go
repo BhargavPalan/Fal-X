@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/BhargavPalan/Fal-X/internal/cli"
@@ -32,6 +33,7 @@ func runScan(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	applyLogging(&globals{debug: opts.Debug, quiet: opts.Quiet, json: opts.JSON})
 
 	// Precheck reports a wide target rather than refusing outright, so the
 	// operator gets to answer for it. A single domain never reaches this.
@@ -69,9 +71,6 @@ func runScan(ctx context.Context, args []string) error {
 		return nil
 	}
 
-	// The stage port is not finished. Refusing here rather than running a
-	// partial pipeline matters: a scan that quietly skipped its content and scan
-	// stages would report itself as a clean run.
 	return runPipeline(ctx, opts)
 }
 
@@ -94,6 +93,11 @@ func runPipeline(ctx context.Context, opts *cli.Options) error {
 		return err
 	}
 
+	// A tool that does not report a version is left out, not an error.
+	for name, v := range tools.New().Versions(ctx, versionedTools) {
+		r.SetToolVersion(name, v)
+	}
+
 	env := &stage.Env{
 		Run:   r,
 		Gate:  newGate(opts),
@@ -102,24 +106,21 @@ func runPipeline(ctx context.Context, opts *cli.Options) error {
 		Paths: paths,
 	}
 
-	// The two concurrent pairs are real. They are run through the stage runner
-	// in order here so that a failure is recorded per stage; making them
-	// genuinely concurrent is the next step, and it must not be done by simply
-	// reordering, because no stage may assume its peer's output exists.
-	if err := stage.Run(ctx, env, opts.StageEnabled); err != nil {
-		logging.Error("%v", err)
-		return logging.Runtimef("%v", err)
+	runErr := stage.Run(ctx, env, opts.StageEnabled)
+
+	// A failed run is worth keeping, so it is saved either way.
+	persistRun(ctx, r.Dir)
+
+	if runErr != nil {
+		logging.Error("%v", runErr)
+		return logging.Runtimef("%v", runErr)
 	}
 
 	logging.Ok("%s", r.SummaryLine())
 	return nil
 }
 
-// printPlan renders the dry-run plan.
-//
-// This is the same code path as a real run with the network gate forced closed,
-// not a separate implementation, so the plan reflects what would actually
-// happen.
+// printPlan renders the dry-run plan: targets, authorization, scope and stages.
 func printPlan(opts *cli.Options) {
 	var b strings.Builder
 
@@ -164,15 +165,9 @@ func printPlan(opts *cli.Options) {
 	fmt.Print(b.String())
 }
 
-// printRules renders the effective scope rules.
-//
-// The counts and the entries are both shown. A count alone hides a rule that was
-// dropped by a parse error, which is exactly what an operator needs to notice
-// before the run rather than after.
-//
-// Addresses and prefixes are listed separately rather than merged, because an
-// exact address and a range are different permissions to grant and a reader
-// should not have to guess which one a line is.
+// printRules lists every effective scope rule, so a rule dropped by a parse error is
+// visible before the run. Addresses and prefixes stay separate because an exact
+// address and a range are different permissions.
 func printRules(b *strings.Builder, r scope.Rules) {
 	fmt.Fprintf(b, "\nscope effective:\n")
 	fmt.Fprintf(b, "  allow apex:      %s\n", orNone(r.AllowApex))
@@ -187,20 +182,13 @@ func printRules(b *strings.Builder, r scope.Rules) {
 	fmt.Fprintf(b, "  deny cidr:       %s\n", orNone(r.DenyCIDR))
 }
 
-// missingTools lists the external tools that are not installed.
-//
-// It is advisory. A missing tool fails its stage, which is recorded in
-// stages.json, rather than aborting the run before anything has been attempted.
+// missingTools lists the required external tools that are not installed. It is
+// advisory: a stage whose tools are absent is skipped and recorded as such.
 func missingTools() []string {
 	required := []string{"httpx", "naabu", "nuclei", "subfinder", "dnsx"}
 	var missing []string
 	for _, tool := range required {
-		path, err := execLookPath(tool)
-		if err != nil {
-			missing = append(missing, tool)
-			continue
-		}
-		if _, err := os.Stat(path); err != nil {
+		if _, err := tools.Resolve(tool); err != nil {
 			missing = append(missing, tool)
 		}
 	}
@@ -214,15 +202,14 @@ func newGate(opts *cli.Options) *net.Gate {
 	return g
 }
 
-// newRun prepares the run directory and records the authorization context.
-//
-// The stage paths are returned alongside the run rather than stored on it, so
-// the run package does not have to know the pipeline's directory layout.
+// newRun prepares the run directory and records the authorization context. The
+// stage paths come back beside the run, not on it, so the run package need not
+// know the pipeline's directory layout.
 func newRun(opts *cli.Options) (*run.Run, stage.Paths, error) {
 	label := sanitiseLabel(opts.Target())
 	stamp := util.RunStamp(now())
 
-	dir := filepathJoin(opts.Output, label, stamp)
+	dir := filepath.Join(opts.Output, label, stamp)
 	r, err := run.Init(dir, label, stamp)
 	if err != nil {
 		return nil, stage.Paths{}, err
@@ -233,6 +220,9 @@ func newRun(opts *cli.Options) (*run.Run, stage.Paths, error) {
 	r.SetProfile(opts.Profile)
 	r.SetDryRun(opts.DryRun)
 	r.SetAllowPrivate(opts.AllowPrivate)
+	r.SetAllowAny(opts.AllowAny)
+	r.SetScopeFingerprint(opts.Scope().Fingerprint())
+	r.SetMode(runMode(opts))
 
 	// The exact allowlist and denylist text the run is authorized under is
 	// recorded, because a result is only meaningful alongside its authorization.
@@ -241,6 +231,23 @@ func newRun(opts *cli.Options) (*run.Run, stage.Paths, error) {
 	}
 
 	return r, paths, nil
+}
+
+// versionedTools are the external tools whose versions are recorded with a run.
+var versionedTools = []string{
+	"httpx", "naabu", "nuclei", "subfinder", "dnsx", "katana", "gau", "ffuf", "amass", "puredns",
+}
+
+// runMode names the kind of target a run started from.
+func runMode(opts *cli.Options) string {
+	switch {
+	case opts.ASN != "":
+		return "asn"
+	case opts.IPTarget != "":
+		return "ip"
+	default:
+		return "domain"
+	}
 }
 
 // helpers
