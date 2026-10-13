@@ -37,8 +37,7 @@ archives:
     files:
       - README.md
       - LICENSE
-      - config/scope.txt.example
-      - config/out-of-scope.txt.example
+      - config/.env.example
     format_overrides:
       - goos: windows
         formats: [zip]
@@ -63,8 +62,7 @@ release:
   footer: |
     ## Authorization
 
-    Fal-X performs active reconnaissance. Only use it against systems you own or
-    have explicit written permission to test. A run is constrained by an
-    allowlist (`--scope`) and a denylist (`config/out-of-scope.txt`); a target
-    wider than a /22, an autonomous system, or a bare wildcard asks for
-    confirmation before anything is contacted.
+    Fal-X performs active reconnaissance. Only run it against systems you own or
+    have explicit written permission to test. There is no scope allowlist: a run
+    is bounded only by a seed-distance, budget and fan-out brake, so seed it
+    deliberately.
