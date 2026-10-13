@@ -19,11 +19,12 @@ func runPrioritize(ctx context.Context, args []string) error {
 	dsn := fs.String("dsn", "", "Postgres connection string (default $FALX_DSN)")
 	org := fs.String("org", "", "organization slug (default $FALX_ORG, then \"default\")")
 	top := fs.Int("top", 20, "how many findings to show (0 shows all)")
+	noMatches := fs.Bool("no-matches", false, "rank only what the scanner reported, not CVEs inferred from the software each asset runs")
 	explain := fs.Bool("explain", false, "print the full derivation of each score")
 	asJSON := fs.Bool("json", false, "shorthand for --format json")
 	format := fs.String("format", "table", "table, md (a document to hand over, with every derivation) or json")
 	out := fs.String("out", "", "write md or json to this file instead of standard output")
-	if err := parseFlags(fs, "fal-x prioritize [--top N] [--explain] [--format table|md|json] [--out file] [--org slug]", args); err != nil {
+	if err := parseFlags(fs, "fal-x prioritize [--top N] [--explain] [--no-matches] [--format table|md|json] [--out file] [--org slug]", args); err != nil {
 		return err
 	}
 	if *asJSON {
@@ -50,7 +51,11 @@ func runPrioritize(ctx context.Context, args []string) error {
 	var ranked []prioritize.Ranked
 	if err := withOrg(ctx, db, orgSlug(*org), func(tx *sql.Tx) error {
 		var err error
-		ranked, err = prioritize.Rank(ctx, tx)
+		if *noMatches {
+			ranked, err = prioritize.Rank(ctx, tx)
+		} else {
+			ranked, err = prioritize.RankAll(ctx, tx)
+		}
 		return err
 	}); err != nil {
 		return err
@@ -82,6 +87,7 @@ func rankedJSON(ranked []prioritize.Ranked) ([]byte, error) {
 	}
 	type item struct {
 		Rank     int      `json:"rank"`
+		Source   string   `json:"source"`
 		Score    int      `json:"score"`
 		Decision string   `json:"decision"`
 		Asset    string   `json:"asset"`
@@ -93,7 +99,7 @@ func rankedJSON(ranked []prioritize.Ranked) ([]byte, error) {
 	}
 	items := make([]item, 0, len(ranked))
 	for i, r := range ranked {
-		it := item{Rank: i + 1, Score: r.Result.Score, Decision: r.Result.Decision, Asset: r.Asset,
+		it := item{Rank: i + 1, Source: r.Source, Score: r.Result.Score, Decision: r.Result.Decision, Asset: r.Asset,
 			Kind: r.Kind, Severity: r.Finding.Severity, Template: r.Finding.Template, CVE: r.Finding.CVE}
 		for _, w := range r.Result.Why {
 			it.Why = append(it.Why, reason{w.Signal, w.Points, w.Detail})

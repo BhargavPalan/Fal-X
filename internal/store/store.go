@@ -3,9 +3,12 @@
 //
 // Tenancy is enforced by Postgres row-level security, not by Go-side WHERE
 // clauses. Every connection sets the org_id GUC on checkout, and the policies in
-// this package's migrations/0001_core.up.sql are the only thing standing between
-// one tenant and another's inventory. Go-side filters are a convenience, never
-// the control.
+// this package's migrations/0001_core.up.sql are the primary thing standing
+// between one tenant and another's inventory. A few tenant reads also carry an
+// explicit org_id = current_org_id() predicate as defence in depth: it reads the
+// same GUC the policies do, so it still scopes the read even if the connecting
+// role were to bypass RLS. RLS remains the control; the Go-side predicate is a
+// backstop, not a substitute.
 package store
 
 import (
@@ -18,6 +21,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/BhargavPalan/Fal-X/internal/logging"
 	_ "github.com/jackc/pgx/v5/stdlib" // database/sql driver
 )
 
@@ -106,8 +110,37 @@ func Open(ctx context.Context, opts Options) (*DB, error) {
 		return nil, fmt.Errorf("store: ping: %w", err)
 	}
 
+	// Tenant isolation is enforced by row-level security, which a superuser or a
+	// BYPASSRLS role ignores — so such a role would silently serve every tenant every
+	// other tenant's data. Warn loudly rather than pretend the guarantee holds. The
+	// tenant reads also carry an explicit org_id predicate, which still scopes them
+	// even for such a role, but the right fix is a NOSUPERUSER NOBYPASSRLS role.
+	if bypass, err := roleBypassesRLS(pingCtx, db); err == nil && bypass {
+		logging.Warn("store: the database role bypasses row-level security (superuser or BYPASSRLS); " +
+			"run Fal-X as a NOSUPERUSER NOBYPASSRLS role so tenant isolation is enforced")
+	}
+
 	out := &DB{sql: db, opts: opts}
 	return out, nil
+}
+
+// roleBypassesRLS reports whether the connected role ignores row-level security.
+func roleBypassesRLS(ctx context.Context, db *sql.DB) (bool, error) {
+	var bypass bool
+	err := db.QueryRowContext(ctx,
+		"SELECT rolsuper OR rolbypassrls FROM pg_roles WHERE rolname = current_user").Scan(&bypass)
+	return bypass, err
+}
+
+// Now returns the database server's current time. Callers that compare against
+// first_seen_at/last_seen_at (which the database stamps) must use this clock, not the
+// application host's, so a scan's own inserts land on the expected side of a window.
+func (d *DB) Now(ctx context.Context) (time.Time, error) {
+	var t time.Time
+	if err := d.sql.QueryRowContext(ctx, "SELECT now()").Scan(&t); err != nil {
+		return time.Time{}, fmt.Errorf("store: now: %w", err)
+	}
+	return t, nil
 }
 
 // SQL exposes the underlying handle for callers that need raw access.

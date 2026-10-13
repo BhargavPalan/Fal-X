@@ -34,7 +34,7 @@ test-short:
 
 .PHONY: test-race
 test-race:
-	@go test -count=1 -race ./internal/run/... ./internal/stage/... ./internal/net/... ./internal/scope/...
+	@go test -count=1 -race -p 1 ./...
 
 .PHONY: cover
 cover:
@@ -46,12 +46,6 @@ cover:
 .PHONY: bench
 bench:
 	@go test -run=XXX -bench=. -benchmem ./internal/...
-
-# The authorization gate is the hot path: it runs once per candidate host and
-# once per discovered URL.
-.PHONY: bench-hot
-bench-hot:
-	@go test -run=XXX -bench='Gate|Explain' -benchmem ./internal/...
 
 # Version is taken from the current git tag, or a short commit when untagged.
 # Releases set it the same way through GoReleaser.

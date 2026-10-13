@@ -36,7 +36,7 @@ func TestRenderMarkdownSummarisesAndExplains(t *testing.T) {
 		"CVE-2021-44228",
 		"CISA's Known Exploited Vulnerabilities list",
 		"99.8% percentile",
-		"internet exposure is not assessed",
+		"the finding carries no exposure class",
 	} {
 		if !strings.Contains(md, want) {
 			t.Errorf("report is missing %q:\n%s", want, md)

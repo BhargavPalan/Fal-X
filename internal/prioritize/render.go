@@ -38,7 +38,8 @@ func RenderMarkdown(ranked []Ranked, total int, generated time.Time) []byte {
 		w(" (showing %d of %d findings)", len(ranked), total)
 	}
 	w(".\n\n")
-	w("*Act* means the CVE is on CISA's Known Exploited Vulnerabilities list. *Attend* means an EPSS " +
+	w("*Act* means the CVE is on CISA's Known Exploited Vulnerabilities list; for a CVE inferred from the " +
+		"software an asset runs, only when its version was matched. *Attend* means an EPSS " +
 		"probability of at least 0.5 or a score of at least 50. Everything else is *Track*. This is a " +
 		"simplified reading, not CISA's full decision tree.\n\n")
 

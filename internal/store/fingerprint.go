@@ -7,6 +7,8 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // schemaFingerprint hashes the parts of the live schema that, if lost, would
@@ -94,11 +96,18 @@ func (d *DB) recordedFingerprint(ctx context.Context) (string, error) {
 	switch {
 	case err == nil:
 		return fp, nil
-	case errors.Is(err, sql.ErrNoRows):
-		// Absent means the ledger predates the fingerprint table, which is not
-		// drift. It is a missing measurement, and the next apply writes one.
+	case errors.Is(err, sql.ErrNoRows), isUndefinedTable(err):
+		// Absent means a database that has not been migrated yet, or a ledger that
+		// predates the fingerprint table. Neither is drift: it is a missing
+		// measurement, and the next apply writes one.
 		return "", nil
 	default:
 		return "", fmt.Errorf("store: read schema fingerprint: %w", err)
 	}
+}
+
+// isUndefinedTable reports whether err is Postgres saying a table does not exist.
+func isUndefinedTable(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "42P01"
 }

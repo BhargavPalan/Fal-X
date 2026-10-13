@@ -168,7 +168,7 @@ func ParseEPSS(r io.Reader) (*EPSSFile, error) {
 		case line == "":
 			continue
 		case strings.HasPrefix(line, "#"):
-			for _, kv := range strings.Split(strings.TrimPrefix(line, "#"), ",") {
+			for kv := range strings.SplitSeq(strings.TrimPrefix(line, "#"), ",") {
 				k, v, ok := strings.Cut(kv, ":")
 				if !ok {
 					continue

@@ -20,6 +20,16 @@ type Source struct {
 	Name string
 	// URL is the feed. It must be https.
 	URL string
+	// Group names a family of sources that can be selected together, such as osv.
+	Group string
+	// Optional keeps the source out of a default sync, for feeds that are large or
+	// that most operators do not need.
+	Optional bool
+	// maxBytes caps the download; zero means maxFeedBytes.
+	maxBytes int64
+	// anySize switches off the shrink guard, for a feed whose size legitimately
+	// varies from one sync to the next.
+	anySize bool
 	// apply parses the body and writes it, returning the record count, the
 	// version to record, and how many rows were skipped as malformed.
 	apply func(ctx context.Context, tx *sql.Tx, body io.Reader) (applied Applied, err error)
@@ -32,8 +42,8 @@ type Applied struct {
 	Version string
 }
 
-// Sources are the feeds Fal-X can sync. Both need no account or key.
-var Sources = []Source{
+// Sources are the feeds Fal-X can sync. None needs an account or a key.
+var Sources = append([]Source{
 	{
 		Name:  "kev",
 		URL:   "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json",
@@ -44,10 +54,17 @@ var Sources = []Source{
 		URL:   "https://epss.cyentia.com/epss_scores-current.csv.gz",
 		apply: applyEPSS,
 	},
-}
+}, append(osvSources(), nvdSources()...)...)
 
 // maxFeedBytes caps one download as it comes off the wire.
 var maxFeedBytes int64 = 64 << 20
+
+func (s Source) limit() int64 {
+	if s.maxBytes > 0 {
+		return s.maxBytes
+	}
+	return maxFeedBytes
+}
 
 // batchSize is how many rows go into one INSERT. Large enough that the real EPSS
 // feed (about 385,000 rows) is a hundred statements, small enough to stay well
@@ -77,23 +94,27 @@ type Options struct {
 	Client *http.Client
 }
 
-// Lookup returns the named sources, all of them when names is empty.
+// Lookup returns the named sources. A group name such as osv selects all of its
+// members. With no names it returns every source that is not Optional.
 func Lookup(names []string) ([]Source, error) {
-	if len(names) == 0 {
-		return Sources, nil
-	}
 	var out []Source
-	for _, n := range names {
-		n = strings.ToLower(strings.TrimSpace(n))
-		found := false
+	if len(names) == 0 {
 		for _, s := range Sources {
-			if s.Name == n {
+			if !s.Optional {
 				out = append(out, s)
-				found = true
-				break
 			}
 		}
-		if !found {
+		return out, nil
+	}
+	for _, n := range names {
+		n = strings.ToLower(strings.TrimSpace(n))
+		before := len(out)
+		for _, s := range Sources {
+			if s.Name == n || s.Group == n {
+				out = append(out, s)
+			}
+		}
+		if len(out) == before {
 			return nil, fmt.Errorf("unknown intelligence source %q (known: %s)", n, sourceNames())
 		}
 	}
@@ -101,9 +122,14 @@ func Lookup(names []string) ([]Source, error) {
 }
 
 func sourceNames() string {
-	n := make([]string, 0, len(Sources))
+	n := make([]string, 0, len(Sources)+1)
+	groups := map[string]bool{}
 	for _, s := range Sources {
 		n = append(n, s.Name)
+		if s.Group != "" && !groups[s.Group] {
+			groups[s.Group] = true
+			n = append(n, s.Group)
+		}
 	}
 	return strings.Join(n, ", ")
 }
@@ -158,26 +184,37 @@ func Sync(ctx context.Context, db *store.DB, src Source, opts Options) (Result, 
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusNotModified {
-		res.NotModified = true
 		res.Took = time.Since(start)
-		// Record that we checked, so `intel status` shows the sync is current.
-		_, err := db.SQL().ExecContext(ctx,
+		// A 304 is only valid as the answer to the conditional request we send when a
+		// prior watermark gave us a validator. Record that we checked so `intel status`
+		// shows the sync is current — but if there is no watermark row to touch, the
+		// server answered 304 to an unconditional request and no data was ever stored.
+		// Report that rather than claim an up-to-date sync that never happened.
+		out, err := db.SQL().ExecContext(ctx,
 			"UPDATE source_watermark SET synced_at = now() WHERE source = $1", src.Name)
-		return res, err
+		if err != nil {
+			return res, err
+		}
+		if n, _ := out.RowsAffected(); n == 0 {
+			return res, fmt.Errorf("intel: %s returned HTTP 304 but no prior sync exists; "+
+				"sync again with --force to download it", src.Name)
+		}
+		res.NotModified = true
+		return res, nil
 	}
 	if resp.StatusCode != http.StatusOK {
 		return res, fmt.Errorf("intel: fetch %s: HTTP %d", src.Name, resp.StatusCode)
 	}
 
 	err = db.InTx(ctx, func(tx *sql.Tx) error {
-		a, err := src.apply(ctx, tx, &capReader{r: resp.Body, left: maxFeedBytes})
+		a, err := src.apply(ctx, tx, &capReader{r: resp.Body, left: src.limit()})
 		if err != nil {
 			return err
 		}
 		// A feed that suddenly holds far fewer records than the last good one is
 		// more likely a partial or wrong response than the real state of the
 		// world. Returning an error rolls the whole sync back, data and watermark.
-		if !opts.AllowShrink && previous > 0 && a.Records*2 < previous {
+		if !opts.AllowShrink && !src.anySize && previous > 0 && a.Records*2 < previous {
 			return fmt.Errorf("intel: %s feed shrank from %d to %d records; refusing it "+
 				"(if that is real, sync again with --allow-shrink)", src.Name, previous, a.Records)
 		}
@@ -221,10 +258,15 @@ func applyKEV(ctx context.Context, tx *sql.Tx, body io.Reader) (Applied, error) 
 	}
 	// Entries CISA has withdrawn must go. Upserting alone leaves them forever, and
 	// a withdrawn entry that still reads as "known exploited" makes the
-	// prioritizer say Act about a CVE that is no longer on the list.
-	if _, err := tx.ExecContext(ctx,
-		"DELETE FROM cve_kev_cisa WHERE cve_id <> ALL($1::text[])", ids); err != nil {
-		return Applied{}, fmt.Errorf("intel: remove withdrawn KEV entries: %w", err)
+	// prioritizer say Act about a CVE that is no longer on the list. But an EMPTY
+	// parse is never a reason to purge the whole table: `cve_id <> ALL('{}')` is true
+	// for every row, so a malformed or truncated feed that yielded no entries would
+	// wipe all KEV data. Only prune when the feed actually carried entries.
+	if len(ids) > 0 {
+		if _, err := tx.ExecContext(ctx,
+			"DELETE FROM cve_kev_cisa WHERE cve_id <> ALL($1::text[])", ids); err != nil {
+			return Applied{}, fmt.Errorf("intel: remove withdrawn KEV entries: %w", err)
+		}
 	}
 	for _, e := range cat.Entries {
 		cwes := e.CWEs

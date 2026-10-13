@@ -169,3 +169,60 @@ func TestParseFinding(t *testing.T) {
 		}
 	}
 }
+
+func TestMatchedKEVActsOnlyWhenTheVersionIsMatched(t *testing.T) {
+	kev := func(tier, conf string) Result {
+		return Score(Input{Severity: "high", CVE: "CVE-2021-41773", KEV: true, Match: tier, MatchConfidence: conf})
+	}
+	if got := kev("affected", "high").Decision; got != Act {
+		t.Errorf("a known-exploited CVE on a matched version = %s, want Act", got)
+	}
+	// Conditional, possible and unverified all leave applicability unconfirmed: the
+	// product is present but NVD has not tied this version to the CVE, or has tied it
+	// only together with something the matcher did not check. Known-exploited is then a
+	// reason to Attend, not yet to Act.
+	for _, tier := range []string{"conditional", "possible", "unverified"} {
+		if got := kev(tier, "low").Decision; got != Attend {
+			t.Errorf("%s: a known-exploited CVE on an unconfirmed version = %s, want Attend, because the product being present is not the version being confirmed affected", tier, got)
+		}
+	}
+	if got := Score(Input{Severity: "high", CVE: "CVE-2021-41773", KEV: true}).Decision; got != Act {
+		t.Errorf("a scanner finding on a known-exploited CVE = %s, want Act", got)
+	}
+}
+
+func TestMatchConfidenceLowersTheScoreAndIsShown(t *testing.T) {
+	score := func(tier, conf string) Result {
+		return Score(Input{Severity: "high", CVE: "CVE-2020-0001", Match: tier, MatchConfidence: conf})
+	}
+	confirmed, backported, guessed := score("affected", "high"), score("affected", "medium"), score("unverified", "low")
+	if confirmed.Score <= backported.Score || backported.Score <= guessed.Score {
+		t.Errorf("scores %d, %d, %d should fall as confidence falls", confirmed.Score, backported.Score, guessed.Score)
+	}
+	shown := false
+	for _, w := range guessed.Why {
+		if w.Signal == "match confidence" && w.Points < 0 {
+			shown = true
+		}
+	}
+	if !shown {
+		t.Errorf("the penalty is not in the derivation: %+v", guessed.Why)
+	}
+	if plain := Score(Input{Severity: "high", CVE: "CVE-2020-0001"}); plain.Score != confirmed.Score {
+		t.Errorf("a high-confidence match should cost nothing: %d vs %d", confirmed.Score, plain.Score)
+	}
+}
+
+func TestScoreNeverGoesNegativeAndStillAddsUp(t *testing.T) {
+	r := Score(Input{Severity: "info", CVE: "CVE-2020-0001", Match: "unverified", MatchConfidence: "low"})
+	if r.Score < 0 {
+		t.Fatalf("score = %d", r.Score)
+	}
+	sum := 0
+	for _, w := range r.Why {
+		sum += w.Points
+	}
+	if sum != r.Score {
+		t.Errorf("reasons sum to %d, score is %d: %+v", sum, r.Score, r.Why)
+	}
+}

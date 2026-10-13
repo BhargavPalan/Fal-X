@@ -6,18 +6,16 @@ import (
 	"fmt"
 	"os"
 	"strconv"
-	"strings"
 	"text/tabwriter"
 	"time"
 
-	"github.com/BhargavPalan/Fal-X/internal/asset"
 	"github.com/BhargavPalan/Fal-X/internal/intel"
 	"github.com/BhargavPalan/Fal-X/internal/logging"
 	"github.com/BhargavPalan/Fal-X/internal/store"
 	"github.com/BhargavPalan/Fal-X/internal/util"
 )
 
-const assetsUsage = "fal-x assets <import|list|show|criticality> [flags]"
+const assetsUsage = "fal-x assets <list|show|criticality> [flags]"
 
 // runAssets manages the asset inventory held in Postgres.
 func runAssets(ctx context.Context, args []string) error {
@@ -29,14 +27,13 @@ func runAssets(ctx context.Context, args []string) error {
 	fs := flagSet("assets " + sub)
 	dsn := fs.String("dsn", "", "Postgres connection string (default $FALX_DSN)")
 	org := fs.String("org", "", "organization slug (default $FALX_ORG, then \"default\")")
-	from := fs.String("from", "", "import: the run directory to import")
 	kind := fs.String("kind", "", "list: only this kind (domain, host, ip, url, service)")
 	limit := fs.Int("limit", 100, "list: how many assets to show")
 	if err := parseFlags(fs, "fal-x assets "+sub+" [flags]", rest); err != nil {
 		return err
 	}
 
-	rating, err := checkAssetsArgs(sub, fs.Args(), *from)
+	rating, err := checkAssetsArgs(sub, fs.Args())
 	if err != nil {
 		return err
 	}
@@ -49,8 +46,6 @@ func runAssets(ctx context.Context, args []string) error {
 
 	slug := orgSlug(*org)
 	switch sub {
-	case "import":
-		return assetsImport(ctx, db, slug, *from)
 	case "list":
 		return assetsList(ctx, db, slug, *kind, *limit)
 	case "criticality":
@@ -62,12 +57,8 @@ func runAssets(ctx context.Context, args []string) error {
 
 // checkAssetsArgs validates the subcommand and its arguments before any database
 // work, and returns the parsed rating for `criticality`.
-func checkAssetsArgs(sub string, args []string, from string) (rating int, err error) {
+func checkAssetsArgs(sub string, args []string) (rating int, err error) {
 	switch sub {
-	case "import":
-		if from == "" {
-			return 0, logging.Usagef("assets import needs --from <run directory>")
-		}
 	case "list":
 	case "show":
 		if len(args) != 1 {
@@ -86,16 +77,6 @@ func checkAssetsArgs(sub string, args []string, from string) (rating int, err er
 		return 0, logging.Usagef("unknown assets subcommand %q; usage: %s", sub, assetsUsage)
 	}
 	return 0, nil
-}
-
-func assetsImport(ctx context.Context, db *store.DB, slug, from string) error {
-	sum, err := asset.Import(ctx, db, slug, from)
-	if err != nil {
-		return logging.Runtimef("%v", err)
-	}
-	logging.Ok("imported %s into org %q: %d asset(s) seen, %d attribute(s), %d observation(s), %d finding(s)",
-		sum.RunID, slug, sum.Assets, sum.Attributes, sum.Observations, sum.Findings)
-	return nil
 }
 
 func assetsList(ctx context.Context, db *store.DB, slug, kind string, limit int) error {
@@ -140,46 +121,21 @@ func assetsShow(ctx context.Context, db *store.DB, slug, id string) error {
 			fmt.Printf("%s  %s\n  first seen %s, last seen %s\n", a.Kind, a.Identifier,
 				a.FirstSeen.UTC().Format(time.RFC3339), a.LastSeen.UTC().Format(time.RFC3339))
 			for _, at := range a.Attributes {
-				fmt.Printf("  %-8s %s  (%s)\n", at.Key, at.Value, at.Source)
+				// Trust reflects corroboration (independent sources agreeing) and freshness
+				// decay (a stale observation is weaker than a recent one).
+				prov := fmt.Sprintf("%s, trust %.2f", at.Source, at.Effective())
+				if at.SourceCount > 1 {
+					prov = fmt.Sprintf("%s +%d sources, trust %.2f", at.Source, at.SourceCount-1, at.Effective())
+				}
+				fmt.Printf("  %-8s %s  (%s)\n", at.Key, at.Value, prov)
 			}
 			if err := printIntelFor(ctx, tx, a.Attributes); err != nil {
 				return err
-			}
-			for _, s := range a.Sightings {
-				fmt.Printf("  seen by %s at stage %s\n", s.RunID, s.Stage)
 			}
 			fmt.Println()
 		}
 		return nil
 	})
-}
-
-// persistRun writes a finished run to Postgres when FALX_DSN is set.
-//
-// It reads only FALX_DSN, not DATABASE_URL or PGDSN as the explicit commands do:
-// those are set on many machines for unrelated programs, and a scan must never write
-// into a database it was not pointed at. A failure is a warning, not a scan failure:
-// the run is already on disk and can be imported later.
-func persistRun(ctx context.Context, dir string) {
-	dsn := strings.TrimSpace(os.Getenv("FALX_DSN"))
-	if dsn == "" {
-		return
-	}
-	retry := "Import it later with: fal-x assets import --from " + dir
-
-	db, err := store.Open(ctx, store.DefaultOptions(dsn))
-	if err != nil {
-		logging.Warn("run not saved to the database: %v. %s", err, retry)
-		return
-	}
-	defer db.Close()
-
-	sum, err := asset.Import(ctx, db, orgSlug(""), dir)
-	if err != nil {
-		logging.Warn("run not saved to the database: %v. %s", err, retry)
-		return
-	}
-	logging.Ok("saved to the database: %d asset(s), %d finding(s)", sum.Assets, sum.Findings)
 }
 
 // printIntelFor shows what the synced intelligence says about every CVE named in an

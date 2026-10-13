@@ -30,19 +30,20 @@ type command struct {
 }
 
 var commands = []command{
-	{"scan", "reconnaissance pipeline against authorized targets", runScan},
+	{"scan", "self-driving attack-surface recon into the entity graph", runScan},
 	{"intel", "vulnerability intelligence: sync, enrich, status, show, search", runIntel},
 	{"assets", "inventory in Postgres: import, list, show, criticality", runAssets},
-	{"match", "match the inventory against the vulnerability corpus (not built yet)", runMatch},
+	{"match", "match the inventory against the vulnerability data", runMatch},
 	{"prioritize", "rank stored findings by urgency, showing why", runPrioritize},
-	{"verify", "confirm a finding against the live target (not built yet)", runVerify},
+	{"diff", "show what changed since a point in time: new, gone, and changed assets", runDiff},
+	{"monitor", "re-scan on a schedule and alert on what changed since the previous run", runMonitor},
+	{"paths", "rank attack paths from a seed to a crown jewel, and the choke points", runPaths},
+	{"verify", "re-check reported exposures against the live target, read-only", runVerify},
 	{"exploit", "run a gated exploit module (not built yet)", runExploit},
 	{"session", "session tracking and evidence collection (not built yet)", runSession},
 	{"report", "render findings as markdown, JSON, or SARIF", runReport},
 	{"serve", "run the HTTP API (not built yet)", runServe},
 	{"migrate", "apply, roll back, or inspect database migrations", runMigrate},
-	{"install", "install the external reconnaissance tools for this platform", runInstall},
-	{"wordlists", "list or fetch the open-source wordlists for brute-force stages", runWordlists},
 	{"version", "print version information", runVersion},
 }
 
@@ -178,7 +179,6 @@ Exit status:
   0  success
   1  runtime failure
   2  usage or validation error
-  3  authorization or scope refusal
 
 Global flags:
   --debug      verbose internal logging

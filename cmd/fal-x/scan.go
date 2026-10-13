@@ -2,318 +2,181 @@ package main
 
 import (
 	"context"
-	"errors"
+	"database/sql"
 	"fmt"
-	"os"
-	"path/filepath"
+	"net/netip"
+	"sort"
+	"strconv"
 	"strings"
 
-	"github.com/BhargavPalan/Fal-X/internal/cli"
-	"github.com/BhargavPalan/Fal-X/internal/config"
+	"github.com/BhargavPalan/Fal-X/internal/engine"
+	"github.com/BhargavPalan/Fal-X/internal/graph"
 	"github.com/BhargavPalan/Fal-X/internal/logging"
-	"github.com/BhargavPalan/Fal-X/internal/net"
-	"github.com/BhargavPalan/Fal-X/internal/run"
-	"github.com/BhargavPalan/Fal-X/internal/scope"
-	"github.com/BhargavPalan/Fal-X/internal/stage"
-	"github.com/BhargavPalan/Fal-X/internal/tools"
-	"github.com/BhargavPalan/Fal-X/internal/util"
+	"github.com/BhargavPalan/Fal-X/internal/recon"
 )
 
-// runScan is the reconnaissance pipeline.
+// runScan drives the self-driving recon engine against one or more seeds, writing
+// everything it finds into the entity graph. It is the scan command.
 func runScan(ctx context.Context, args []string) error {
-	// Help is intercepted before parsing. The scan flags are declared by
-	// internal/cli, which is where the safety preconditions live and therefore
-	// the one place that must see every flag.
-	if wantsHelpArgs(args) {
-		fmt.Print(scanUsage())
-		return errHelp
-	}
-
-	opts, err := cli.Parse(args...)
-	if err != nil {
-		return err
-	}
-	applyLogging(&globals{debug: opts.Debug, quiet: opts.Quiet, json: opts.JSON})
-
-	// Precheck reports a wide target rather than refusing outright, so the
-	// operator gets to answer for it. A single domain never reaches this.
-	err = opts.Precheck()
-
-	var needs *cli.NeedsConfirm
-	if errors.As(err, &needs) {
-		confirmed, cerr := confirmWideTarget(needs, stdinIsTerminal())
-		if cerr != nil {
-			return cerr
-		}
-		if !confirmed {
-			logging.Warn("not confirmed; nothing was contacted")
-			return nil
-		}
-		opts.Yes = true
-		if err = opts.Precheck(); err != nil {
-			return err
-		}
-	}
-	if err != nil {
+	fs := flagSet("scan")
+	dsn := fs.String("dsn", "", "Postgres connection string (default $FALX_DSN)")
+	org := fs.String("org", "", "organization slug (default $FALX_ORG, then \"default\")")
+	mode := fs.String("mode", "active", "passive (no packets to the target), active, or full")
+	depth := fs.Int("depth", 2, "how many hops from a seed the engine may follow (0 = unbounded)")
+	budget := fs.Int("budget", 2000, "total source-call budget (0 = unbounded)")
+	fanout := fs.Int("max-fanout", 1000, "cap on new entities enqueued per source call (0 = unbounded)")
+	dryRun := fs.Bool("dry-run", false, "print what would run and contact nothing")
+	quiet := fs.Bool("quiet", false, "log errors only")
+	debug := fs.Bool("debug", false, "verbose internal logging")
+	asJSON := fs.Bool("json", false, "machine-readable logging")
+	if err := parseFlags(fs, "fal-x scan <domain|host|ip|cidr|asn>... [--mode] [--depth N] [--budget N] [--org slug]", args); err != nil {
 		return err
 	}
 
-	// --why-denied explains one decision and exits. It runs before anything
-	// else because an operator debugging a rejection should not have to start a
-	// run to get an answer.
-	if opts.WhyDenied != "" {
-		fmt.Println(opts.Explain(opts.WhyDenied))
+	passiveOnly := false
+	switch *mode {
+	case "passive":
+		passiveOnly = true
+	case "active", "full":
+	default:
+		return logging.Usagef("unknown mode %q (expected passive, active or full)", *mode)
+	}
+
+	var seeds []graph.Seed
+	for _, a := range fs.Args() {
+		seeds = append(seeds, seedsFor(a)...)
+	}
+	if len(seeds) == 0 {
+		return logging.Usagef("scan needs at least one target (domain, host, IP, CIDR or ASN)")
+	}
+
+	// Logging flags work after the command name too, so "fal-x scan host --quiet"
+	// behaves as expected.
+	applyLogging(&globals{debug: *debug, quiet: *quiet, json: *asJSON})
+
+	if *dryRun {
+		printScanPlan(seeds, *mode, *depth, *budget, *fanout)
 		return nil
 	}
 
-	if opts.DryRun {
-		printPlan(opts)
-		return nil
+	db, err := openDB(ctx, *dsn)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	id, err := db.EnsureOrg(ctx, orgSlug(*org), orgSlug(*org))
+	if err != nil {
+		return logging.Runtimef("%v", err)
+	}
+	scoped, err := db.WithOrg(ctx, id)
+	if err != nil {
+		return logging.Runtimef("%v", err)
 	}
 
-	return runPipeline(ctx, opts)
+	logging.Info("scan starting: %d seed(s), mode %s", len(seeds), *mode)
+	stats, err := recon.Run(ctx, scoped, id, recon.Options{
+		Seeds:       seeds,
+		Brake:       engine.Brake{MaxDepth: *depth, Budget: *budget, MaxFanout: *fanout},
+		PassiveOnly: passiveOnly,
+		Full:        *mode == "full",
+	})
+	if err != nil {
+		return logging.Runtimef("%v", err)
+	}
+
+	logging.Ok("scan complete: %d entities worked, %d source runs, %d discovered, %d source error(s)",
+		stats.Jobs, stats.Collects, stats.Produced, stats.Errors)
+	return summarizeGraph(ctx, scoped)
 }
 
-// runPipeline executes the enabled stages and reports the run.
-//
-// The stage outcomes are authoritative. A stage that failed is recorded as
-// failed and the run's exit status reflects that, regardless of what the log
-// says about finishing.
-func runPipeline(ctx context.Context, opts *cli.Options) error {
-	if errs := opts.LoadCredentials(); len(errs) > 0 {
-		return errs[0]
-	}
-
-	r, paths, err := newRun(opts)
-	if err != nil {
+// summarizeGraph prints the entity counts by type after a run.
+func summarizeGraph(ctx context.Context, db interface {
+	InTx(context.Context, func(*sql.Tx) error) error
+}) error {
+	var counts map[graph.EntityType]int
+	if err := db.InTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		counts, err = graph.CountByType(ctx, tx)
 		return err
+	}); err != nil {
+		return logging.Runtimef("%v", err)
 	}
-
-	if err := paths.Ensure(); err != nil {
-		return err
+	if len(counts) == 0 {
+		return nil
 	}
-
-	// A tool that does not report a version is left out, not an error.
-	for name, v := range tools.New().Versions(ctx, versionedTools) {
-		r.SetToolVersion(name, v)
+	types := make([]string, 0, len(counts))
+	for t := range counts {
+		types = append(types, string(t))
 	}
-
-	env := &stage.Env{
-		Run:   r,
-		Gate:  newGate(opts),
-		Tools: tools.NewRecording(tools.New()),
-		Opts:  opts,
-		Paths: paths,
+	sort.Strings(types)
+	fmt.Println("\ngraph:")
+	for _, t := range types {
+		fmt.Printf("  %-14s %d\n", t, counts[graph.EntityType(t)])
 	}
-
-	runErr := stage.Run(ctx, env, opts.StageEnabled)
-
-	// A failed run is worth keeping, so it is saved either way.
-	persistRun(ctx, r.Dir)
-
-	if runErr != nil {
-		logging.Error("%v", runErr)
-		return logging.Runtimef("%v", runErr)
-	}
-
-	logging.Ok("%s", r.SummaryLine())
 	return nil
 }
 
-// printPlan renders the dry-run plan: targets, authorization, scope and stages.
-func printPlan(opts *cli.Options) {
-	var b strings.Builder
-
-	fmt.Fprintf(&b, "fal-x %s -- dry run, no network requests will be made\n\n", config.Version)
-
-	fmt.Fprintf(&b, "targets:\n")
-	for _, seed := range opts.Seeds() {
-		fmt.Fprintf(&b, "  %s\n", seed)
-	}
-	if opts.IPTarget != "" {
-		fmt.Fprintf(&b, "  %s (ip/cidr)\n", opts.IPTarget)
-	}
-	if opts.ASN != "" {
-		fmt.Fprintf(&b, "  %s (asn)\n", opts.ASN)
-	}
-
-	fmt.Fprintln(&b)
-	if opts.Scope() != nil && opts.Scope().Loaded() {
-		fmt.Fprintf(&b, "authorization:  restricted to the scope allowlist\n")
-	} else {
-		fmt.Fprintf(&b, "authorization:  none configured, every named target is reachable\n")
-	}
-	fmt.Fprintf(&b, "scope allowlist: %s%s\n", orUnset(opts.ScopeFile), readableSuffix(opts.ScopeFile))
-	fmt.Fprintf(&b, "scope denylist:  %s%s\n", orUnset(opts.OutOfScopeFile), readableSuffix(opts.OutOfScopeFile))
-	fmt.Fprintf(&b, "allow-private:   %v\n", opts.AllowPrivate)
-	fmt.Fprintf(&b, "allow-any:       %v\n", opts.AllowAny)
-	fmt.Fprintf(&b, "profile:         %s\n", opts.Profile)
-	fmt.Fprintf(&b, "output root:     %s\n", opts.Output)
-	fmt.Fprintf(&b, "stages enabled:  %s\n", stageList(opts.Stages()))
-
-	sc := opts.Scope()
-	switch {
-	case sc == nil, !sc.Loaded():
-		fmt.Fprintf(&b, "\nscope effective: unrestricted, the targets named above are what "+
-			"gets scanned\n  pass --scope <file> to hold the run to an allowlist\n")
-	default:
-		printRules(&b, sc.Rules())
-	}
-
-	fmt.Fprintf(&b, "\nmissing tools: %s\n", joinComma(missingTools()))
-
-	fmt.Print(b.String())
-}
-
-// printRules lists every effective scope rule, so a rule dropped by a parse error is
-// visible before the run. Addresses and prefixes stay separate because an exact
-// address and a range are different permissions.
-func printRules(b *strings.Builder, r scope.Rules) {
-	fmt.Fprintf(b, "\nscope effective:\n")
-	fmt.Fprintf(b, "  allow apex:      %s\n", orNone(r.AllowApex))
-	fmt.Fprintf(b, "  allow wildcard:  %s\n", orNone(r.AllowWildcard))
-	fmt.Fprintf(b, "  allow host:port: %s\n", orNone(r.AllowHostPort))
-	fmt.Fprintf(b, "  allow ip:        %s\n", orNone(r.AllowIP))
-	fmt.Fprintf(b, "  allow cidr:      %s\n", orNone(r.AllowCIDR))
-	fmt.Fprintf(b, "  deny apex:       %s\n", orNone(r.DenyApex))
-	fmt.Fprintf(b, "  deny wildcard:   %s\n", orNone(r.DenyWildcard))
-	fmt.Fprintf(b, "  deny host:port:  %s\n", orNone(r.DenyHostPort))
-	fmt.Fprintf(b, "  deny ip:         %s\n", orNone(r.DenyIP))
-	fmt.Fprintf(b, "  deny cidr:       %s\n", orNone(r.DenyCIDR))
-}
-
-// missingTools lists the required external tools that are not installed. It is
-// advisory: a stage whose tools are absent is skipped and recorded as such.
-func missingTools() []string {
-	required := []string{"httpx", "naabu", "nuclei", "subfinder", "dnsx"}
-	var missing []string
-	for _, tool := range required {
-		if _, err := tools.Resolve(tool); err != nil {
-			missing = append(missing, tool)
-		}
-	}
-	return missing
-}
-
-// newGate builds the network gate for a run.
-func newGate(opts *cli.Options) *net.Gate {
-	g := net.New(opts.Scope())
-	g.SetDryRun(opts.DryRun)
-	return g
-}
-
-// newRun prepares the run directory and records the authorization context. The
-// stage paths come back beside the run, not on it, so the run package need not
-// know the pipeline's directory layout.
-func newRun(opts *cli.Options) (*run.Run, stage.Paths, error) {
-	label := sanitiseLabel(opts.Target())
-	stamp := util.RunStamp(now())
-
-	dir := filepath.Join(opts.Output, label, stamp)
-	r, err := run.Init(dir, label, stamp)
-	if err != nil {
-		return nil, stage.Paths{}, err
-	}
-	paths := stage.NewPaths(dir)
-
-	r.SetTarget(opts.Target())
-	r.SetProfile(opts.Profile)
-	r.SetDryRun(opts.DryRun)
-	r.SetAllowPrivate(opts.AllowPrivate)
-	r.SetAllowAny(opts.AllowAny)
-	r.SetScopeFingerprint(opts.Scope().Fingerprint())
-	r.SetMode(runMode(opts))
-
-	// The exact allowlist and denylist text the run is authorized under is
-	// recorded, because a result is only meaningful alongside its authorization.
-	if b, err := os.ReadFile(opts.ScopeFile); err == nil {
-		r.SetScope(string(b), readText(opts.OutOfScopeFile))
-	}
-
-	return r, paths, nil
-}
-
-// versionedTools are the external tools whose versions are recorded with a run.
-var versionedTools = []string{
-	"httpx", "naabu", "nuclei", "subfinder", "dnsx", "katana", "gau", "ffuf", "amass", "puredns",
-}
-
-// runMode names the kind of target a run started from.
-func runMode(opts *cli.Options) string {
-	switch {
-	case opts.ASN != "":
-		return "asn"
-	case opts.IPTarget != "":
-		return "ip"
-	default:
-		return "domain"
-	}
-}
-
-// helpers
-
-func orUnset(s string) string {
+// seedsFor classifies a raw target into one or more typed seeds. An address is an
+// IP, a prefix is a netblock, ASnnnn is an ASN. A name is seeded as both a host (to
+// resolve) and a domain (to enumerate subdomains from certificate transparency), so
+// one target drives both discovery paths without the operator choosing.
+func seedsFor(raw string) []graph.Seed {
+	s := strings.TrimSpace(raw)
 	if s == "" {
-		return "<unset>"
+		return nil
 	}
-	return s
+	if _, err := netip.ParseAddr(s); err == nil {
+		return []graph.Seed{{Type: graph.TypeIP, Key: s}}
+	}
+	if _, err := netip.ParsePrefix(s); err == nil {
+		return []graph.Seed{{Type: graph.TypeNetblock, Key: s}}
+	}
+	if up := strings.ToUpper(s); strings.HasPrefix(up, "AS") && allDigits(up[2:]) {
+		return []graph.Seed{{Type: graph.TypeASN, Key: s}}
+	}
+	return []graph.Seed{{Type: graph.TypeHost, Key: s}, {Type: graph.TypeDomain, Key: s}}
 }
 
-// orNone renders a rule list, or "none" when it is empty.
-func orNone(list []string) string {
-	if len(list) == 0 {
-		return "none"
-	}
-	return strings.Join(list, " ")
-}
-
-func stageList(stages []string) string {
-	if len(stages) == 0 {
-		return "none"
-	}
-	return " " + strings.Join(stages, " ")
-}
-
-// readableSuffix reports whether a path can be read, for the plan display.
-func readableSuffix(path string) string {
-	if path == "" {
-		return ""
-	}
-	if _, err := os.Stat(path); err != nil {
-		return " (MISSING)"
-	}
-	return " (readable)"
-}
-
-func readText(path string) string {
-	if path == "" {
-		return ""
-	}
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return ""
-	}
-	return string(b)
-}
-
-// sanitiseLabel makes a target safe to use as a directory name.
-func sanitiseLabel(s string) string {
+func allDigits(s string) bool {
 	if s == "" {
-		return "run"
+		return false
 	}
-	var b strings.Builder
 	for _, r := range s {
-		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9',
-			r == '.', r == '-', r == '_':
-			b.WriteRune(r)
-		default:
-			b.WriteByte('_')
+		if r < '0' || r > '9' {
+			return false
 		}
 	}
-	label := b.String()
-	if len(label) > 64 {
-		label = label[:64]
+	return true
+}
+
+// printScanPlan shows what a scan would do, for --dry-run. It opens no database and
+// contacts nothing.
+func printScanPlan(seeds []graph.Seed, mode string, depth, budget, fanout int) {
+	fmt.Println("scan plan (dry run, nothing will be contacted):")
+	fmt.Printf("  mode: %s\n", mode)
+	fmt.Printf("  depth: %s   budget: %s   max-fanout: %s\n",
+		unbounded(depth), unbounded(budget), unbounded(fanout))
+	fmt.Printf("  targets (%d):\n", len(seeds))
+	for _, s := range seeds {
+		fmt.Printf("    %-8s %s\n", s.Type, s.Key)
 	}
-	return label
+	var names []string
+	for _, src := range recon.DefaultRegistry().All() {
+		c := src.Capability()
+		if mode == "passive" && !c.Passive {
+			continue
+		}
+		names = append(names, c.Name)
+	}
+	sort.Strings(names)
+	fmt.Printf("  sources: %s\n", strings.Join(names, ", "))
+}
+
+// unbounded renders a brake dimension, showing 0 as "unbounded".
+func unbounded(n int) string {
+	if n <= 0 {
+		return "unbounded"
+	}
+	return strconv.Itoa(n)
 }

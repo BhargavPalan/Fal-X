@@ -3,10 +3,14 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // TestLoadMigrations checks the embedded set without needing a database.
@@ -162,9 +166,9 @@ func TestMigrateAppliesAndRollsBack(t *testing.T) {
 
 	// Tables the core migration must create.
 	for _, want := range []string{
-		"org", "app_user", "scope_snapshot",
-		"run", "run_stage",
-		"asset", "asset_attribute", "asset_observation",
+		"org", "app_user", "run",
+		"entity", "entity_edge", "entity_fact", "source_cache",
+		"match_result",
 		"schema_migration",
 	} {
 		var n int
@@ -206,7 +210,8 @@ func TestMigrateAppliesAndRollsBack(t *testing.T) {
 		FROM pg_class
 		WHERE relnamespace = 'public'::regnamespace AND relkind = 'r'
 		  AND relname NOT IN ('org', 'schema_fingerprint', 'schema_migration',
-		                      'cve', 'cve_kev_cisa', 'cve_epss', 'cve_nvd', 'source_watermark')
+		                      'cve', 'cve_kev_cisa', 'cve_epss', 'cve_nvd', 'source_watermark',
+		                      'osv_advisory', 'osv_affected', 'cve_alias', 'cve_cpe')
 		ORDER BY relname`)
 	if err != nil {
 		t.Fatalf("list tables: %v", err)
@@ -302,16 +307,16 @@ func TestSchemaFingerprintDetectsOutOfBandChange(t *testing.T) {
 	}{
 		{
 			name:   "dropped policy",
-			tamper: "DROP POLICY asset_rls ON asset",
+			tamper: "DROP POLICY entity_rls ON entity",
 			restore: []string{
-				"DROP POLICY IF EXISTS asset_rls ON asset",
-				"CREATE POLICY asset_rls ON asset USING (org_id = current_org_id())",
+				"DROP POLICY IF EXISTS entity_rls ON entity",
+				"CREATE POLICY entity_rls ON entity USING (org_id = current_org_id())",
 			},
 		},
 		{
 			name:    "disabled row level security",
-			tamper:  "ALTER TABLE asset DISABLE ROW LEVEL SECURITY",
-			restore: []string{"ALTER TABLE asset ENABLE ROW LEVEL SECURITY"},
+			tamper:  "ALTER TABLE entity DISABLE ROW LEVEL SECURITY",
+			restore: []string{"ALTER TABLE entity ENABLE ROW LEVEL SECURITY"},
 		},
 		{
 			name:    "cleared force flag",
@@ -401,7 +406,7 @@ func TestSchemaFingerprintIsStable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("schemaFingerprint: %v", err)
 	}
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		again, err := schemaFingerprint(ctx, db)
 		if err != nil {
 			t.Fatalf("schemaFingerprint: %v", err)
@@ -426,6 +431,20 @@ func TestRowLevelSecurityIsolatesTenants(t *testing.T) {
 	}
 	db := newTestDB(t)
 	ctx := context.Background()
+
+	// A superuser or BYPASSRLS role ignores row-level security, so under such a role
+	// every tenant would see every row and this test would prove nothing. Assert the
+	// role is subject to RLS and fail with a clear reason, rather than a cryptic count
+	// mismatch, if the suite is run against a privileged DSN.
+	var bypass bool
+	if err := db.SQL().QueryRowContext(ctx,
+		"SELECT rolsuper OR rolbypassrls FROM pg_roles WHERE rolname = current_user").Scan(&bypass); err != nil {
+		t.Fatalf("check role privileges: %v", err)
+	}
+	if bypass {
+		t.Fatal("the test database role bypasses row-level security (superuser or BYPASSRLS); " +
+			"run the suite as a NOSUPERUSER NOBYPASSRLS role or this test proves nothing")
+	}
 
 	if _, err := db.Migrate(ctx); err != nil {
 		t.Fatalf("Migrate: %v", err)
@@ -455,12 +474,12 @@ func TestRowLevelSecurityIsolatesTenants(t *testing.T) {
 		}
 		err = scoped.InTx(ctx, func(tx *sql.Tx) error {
 			_, err := tx.ExecContext(ctx,
-				"INSERT INTO asset (org_id, kind, identifier) VALUES ($1, 'host', $2)",
+				"INSERT INTO entity (org_id, type, key) VALUES ($1, 'host', $2)",
 				id, name+".example.test")
 			return err
 		})
 		if err != nil {
-			t.Fatalf("insert asset for %s: %v", name, err)
+			t.Fatalf("insert entity for %s: %v", name, err)
 		}
 	}
 
@@ -471,13 +490,13 @@ func TestRowLevelSecurityIsolatesTenants(t *testing.T) {
 		}
 		var n int
 		err = scoped.InTx(ctx, func(tx *sql.Tx) error {
-			return tx.QueryRowContext(ctx, "SELECT count(*) FROM asset").Scan(&n)
+			return tx.QueryRowContext(ctx, "SELECT count(*) FROM entity").Scan(&n)
 		})
 		if err != nil {
-			t.Fatalf("count assets for %s: %v", name, err)
+			t.Fatalf("count entities for %s: %v", name, err)
 		}
 		if n != 1 {
-			t.Errorf("tenant %s sees %d assets, want 1 (row-level security not applied)", name, n)
+			t.Errorf("tenant %s sees %d entities, want 1 (row-level security not applied)", name, n)
 		}
 	}
 }
@@ -579,7 +598,7 @@ func TestWithOrgDoesNotLeakAcrossPooledConnections(t *testing.T) {
 	for name, d := range map[string]*DB{"gamma": a, "delta": b} {
 		if err := d.InTx(ctx, func(tx *sql.Tx) error {
 			_, err := tx.ExecContext(ctx,
-				"INSERT INTO asset (org_id, kind, identifier) VALUES ($1, 'host', $2)",
+				"INSERT INTO entity (org_id, type, key) VALUES ($1, 'host', $2)",
 				ids[name], name+".example.test")
 			return err
 		}); err != nil {
@@ -594,11 +613,11 @@ func TestWithOrgDoesNotLeakAcrossPooledConnections(t *testing.T) {
 	}
 	defer held.Close()
 
-	for round := 0; round < 20; round++ {
+	for round := range 20 {
 		for name, d := range map[string]*DB{"gamma": a, "delta": b} {
 			var host string
 			if err := d.InTx(ctx, func(tx *sql.Tx) error {
-				return tx.QueryRowContext(ctx, "SELECT identifier FROM asset").Scan(&host)
+				return tx.QueryRowContext(ctx, "SELECT key FROM entity").Scan(&host)
 			}); err != nil {
 				t.Fatalf("round %d, %s: %v", round, name, err)
 			}
@@ -609,221 +628,16 @@ func TestWithOrgDoesNotLeakAcrossPooledConnections(t *testing.T) {
 	}
 }
 
-// TestRunStageIsTenantIsolated pins that one tenant cannot read another's run
-// stages. run_stage carries no org_id of its own, so it has to be isolated
-// through its parent run; the first migration enabled row-level security on every
-// other tenant table and missed this one, so every tenant could read every stage.
-func TestRunStageIsTenantIsolated(t *testing.T) {
-	db := newTestDB(t)
-	ctx := context.Background()
-	if _, err := db.Migrate(ctx); err != nil {
-		t.Fatalf("Migrate: %v", err)
-	}
+// TestRemovedRunStageAndScope previously held TestRunStageIsTenantIsolated and
+// TestMigration0005MergesExistingDuplicateSnapshots. Both exercised the run_stage and
+// scope_snapshot tables, which migration 0012 retired along with the old pipeline and
+// scope gating, so the tests were removed with them.
 
-	suffix := time.Now().UnixNano()
-	ids := map[string]int64{}
-	for _, name := range []string{"stage-a", "stage-b"} {
-		var id int64
-		if err := db.SQL().QueryRowContext(ctx,
-			"INSERT INTO org (slug, name) VALUES ($1, $2) RETURNING id",
-			name+"-"+itoa(suffix), name).Scan(&id); err != nil {
-			t.Fatal(err)
-		}
-		ids[name] = id
+func TestIsUndefinedTable(t *testing.T) {
+	if !isUndefinedTable(fmt.Errorf("wrapped: %w", &pgconn.PgError{Code: "42P01"})) {
+		t.Error("a missing-table error was not recognised")
 	}
-	t.Cleanup(func() {
-		_, _ = db.SQL().ExecContext(ctx, "DELETE FROM org WHERE id = ANY($1)",
-			[]int64{ids["stage-a"], ids["stage-b"]})
-	})
-
-	for name, id := range ids {
-		scoped, err := db.WithOrg(ctx, id)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := scoped.InTx(ctx, func(tx *sql.Tx) error {
-			var runPK int64
-			if err := tx.QueryRowContext(ctx, `
-				INSERT INTO run (org_id, run_id, label) VALUES ($1, $2, $3) RETURNING id`,
-				id, name+"-run", name).Scan(&runPK); err != nil {
-				return err
-			}
-			_, err := tx.ExecContext(ctx, `
-				INSERT INTO run_stage (run_pk, name, seq, status) VALUES ($1, 'subs', 0, 'succeeded')`, runPK)
-			return err
-		}); err != nil {
-			t.Fatalf("seed %s: %v", name, err)
-		}
-	}
-
-	for name, id := range ids {
-		scoped, _ := db.WithOrg(ctx, id)
-		var n int
-		if err := scoped.InTx(ctx, func(tx *sql.Tx) error {
-			return tx.QueryRowContext(ctx, "SELECT count(*) FROM run_stage").Scan(&n)
-		}); err != nil {
-			t.Fatal(err)
-		}
-		if n != 1 {
-			t.Errorf("tenant %s sees %d run stages, want exactly its own 1 (run_stage has no row-level security)", name, n)
-		}
-	}
-}
-
-// TestScopeSnapshotIsUniqueUnderConcurrency pins that runs with an identical scope
-// share one snapshot even when they are recorded at the same moment. UpsertRun used
-// to select and then insert with nothing to arbitrate, so concurrent runs each
-// found no snapshot and each inserted one.
-func TestScopeSnapshotIsUniqueUnderConcurrency(t *testing.T) {
-	db := newTestDB(t)
-	ctx := context.Background()
-	if _, err := db.Migrate(ctx); err != nil {
-		t.Fatalf("Migrate: %v", err)
-	}
-
-	slug := "snap-" + itoa(time.Now().UnixNano())
-	orgID, err := db.EnsureOrg(ctx, slug, slug)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _, _ = db.SQL().ExecContext(ctx, "DELETE FROM org WHERE slug = $1", slug) })
-	scoped, _ := db.WithOrg(ctx, orgID)
-
-	const workers = 16
-	errs := make(chan error, workers)
-	start := make(chan struct{})
-	for i := 0; i < workers; i++ {
-		go func(i int) {
-			<-start
-			errs <- scoped.InTx(ctx, func(tx *sql.Tx) error {
-				_, err := UpsertRun(ctx, tx, orgID,
-					Run{RunID: "run-" + itoa(int64(i)), Label: "l", Mode: "domain", Status: "completed",
-						Targets: []string{"t"}, Profile: "normal", StartedAt: time.Now()},
-					Scope{AllowlistDigest: "same-digest", DenylistDigest: "same-deny"}, nil)
-				return err
-			})
-		}(i)
-	}
-	close(start)
-	for i := 0; i < workers; i++ {
-		if err := <-errs; err != nil {
-			t.Fatalf("a concurrent UpsertRun failed: %v", err)
-		}
-	}
-
-	var n int
-	if err := scoped.InTx(ctx, func(tx *sql.Tx) error {
-		return tx.QueryRowContext(ctx, "SELECT count(*) FROM scope_snapshot").Scan(&n)
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if n != 1 {
-		t.Errorf("scope snapshots = %d after %d concurrent runs with one scope, want 1", n, workers)
-	}
-}
-
-// TestMigration0005MergesExistingDuplicateSnapshots pins the repair path: a database
-// that already holds duplicate scope snapshots (made before the unique index
-// existed) must come out with one snapshot per scope, every run still pointing at a
-// snapshot that exists, and row-level security FORCEd again on the tables the
-// migration had to lift it from.
-func TestMigration0005MergesExistingDuplicateSnapshots(t *testing.T) {
-	db := newTestDB(t)
-	ctx := context.Background()
-	if _, err := db.Migrate(ctx); err != nil {
-		t.Fatalf("Migrate: %v", err)
-	}
-	// Step back over 0005 (the newest migration is the one under test).
-	ms, err := LoadMigrations()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if ms[len(ms)-1].Name != "scope_snapshot_unique" {
-		t.Skipf("0005 is not the newest migration (it is %s); this test targets 0005", ms[len(ms)-1].Name)
-	}
-	if _, err := db.Rollback(ctx, 4); err != nil { // target version 4: reverts 0005 only
-		t.Fatalf("Rollback 0005: %v", err)
-	}
-
-	slug := "merge-" + itoa(time.Now().UnixNano())
-	orgID, err := db.EnsureOrg(ctx, slug, slug)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _, _ = db.SQL().ExecContext(ctx, "DELETE FROM org WHERE slug = $1", slug) })
-	scoped, _ := db.WithOrg(ctx, orgID)
-
-	// Three identical snapshots, a fourth different one, and runs on two of the
-	// duplicates plus one on the different one.
-	var snaps [4]int64
-	if err := scoped.InTx(ctx, func(tx *sql.Tx) error {
-		for i := range snaps {
-			digest := "dup"
-			if i == 3 {
-				digest = "different"
-			}
-			if err := tx.QueryRowContext(ctx, `
-				INSERT INTO scope_snapshot (org_id, allowlist_digest) VALUES ($1, $2) RETURNING id`,
-				orgID, digest).Scan(&snaps[i]); err != nil {
-				return err
-			}
-		}
-		for i, snap := range []int64{snaps[1], snaps[2], snaps[3]} {
-			if _, err := tx.ExecContext(ctx, `
-				INSERT INTO run (org_id, run_id, label, scope_id) VALUES ($1, $2, 'l', $3)`,
-				orgID, "mr-"+itoa(int64(i)), snap); err != nil {
-				return err
-			}
-		}
-		return nil
-	}); err != nil {
-		t.Fatalf("seed duplicates: %v", err)
-	}
-
-	if _, err := db.Migrate(ctx); err != nil {
-		t.Fatalf("re-applying 0005 over duplicates: %v", err)
-	}
-
-	if err := scoped.InTx(ctx, func(tx *sql.Tx) error {
-		var n int
-		if err := tx.QueryRowContext(ctx, "SELECT count(*) FROM scope_snapshot").Scan(&n); err != nil {
-			return err
-		}
-		if n != 2 {
-			t.Errorf("snapshots after the merge = %d, want 2 (one for the duplicated scope, one for the other)", n)
-		}
-		var dangling int
-		if err := tx.QueryRowContext(ctx, `
-			SELECT count(*) FROM run r
-			WHERE r.scope_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM scope_snapshot s WHERE s.id = r.scope_id)`).
-			Scan(&dangling); err != nil {
-			return err
-		}
-		if dangling != 0 {
-			t.Errorf("%d run(s) point at a snapshot that no longer exists", dangling)
-		}
-		var runs int
-		if err := tx.QueryRowContext(ctx, "SELECT count(DISTINCT scope_id) FROM run").Scan(&runs); err != nil {
-			return err
-		}
-		if runs != 2 {
-			t.Errorf("runs reference %d distinct snapshots, want 2", runs)
-		}
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	// The migration lifted FORCE to repair; it must be back on.
-	for _, tbl := range []string{"run", "scope_snapshot"} {
-		var forced bool
-		if err := db.SQL().QueryRowContext(ctx,
-			"SELECT relforcerowsecurity FROM pg_class WHERE relname = $1 AND relnamespace = 'public'::regnamespace",
-			tbl).Scan(&forced); err != nil {
-			t.Fatal(err)
-		}
-		if !forced {
-			t.Errorf("%s no longer FORCEs row-level security after migration 0005", tbl)
-		}
+	if isUndefinedTable(&pgconn.PgError{Code: "42501"}) || isUndefinedTable(errors.New("other")) {
+		t.Error("an unrelated error was taken for a missing table")
 	}
 }

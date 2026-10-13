@@ -23,7 +23,7 @@ func nonBlankLines(t *testing.T, path string) int {
 		return 0
 	}
 	n := 0
-	for _, l := range strings.Split(string(b), "\n") {
+	for l := range strings.SplitSeq(string(b), "\n") {
 		if strings.TrimSpace(l) != "" {
 			n++
 		}

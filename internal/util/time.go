@@ -13,10 +13,7 @@ import (
 // A negative duration, which a clock adjustment can produce, clamps to zero
 // rather than rendering as "-3s".
 func FormatElapsed(d time.Duration) string {
-	s := int64(d.Seconds())
-	if s < 0 {
-		s = 0
-	}
+	s := max(int64(d.Seconds()), 0)
 
 	switch {
 	case s < 60:

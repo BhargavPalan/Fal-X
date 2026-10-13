@@ -15,7 +15,7 @@ import (
 	"github.com/BhargavPalan/Fal-X/internal/util"
 )
 
-const intelUsage = "fal-x intel <sync|enrich|status|show|search> [flags]"
+const intelUsage = "fal-x intel <sync|enrich|status|show|search|product> [flags]"
 
 // runIntel manages the vulnerability intelligence that findings are ranked against.
 func runIntel(ctx context.Context, args []string) error {
@@ -26,16 +26,16 @@ func runIntel(ctx context.Context, args []string) error {
 
 	fs := flagSet("intel " + sub)
 	dsn := fs.String("dsn", "", "Postgres connection string (default $FALX_DSN)")
-	sources := fs.String("source", "", "sync: comma-separated sources (default all: kev, epss)")
+	sources := fs.String("source", "", "sync: comma-separated sources or groups (default kev, epss; osv adds every OSV ecosystem, nvd the whole NVD corpus, or name one such as osv-go or nvd-2024)")
 	force := fs.Bool("force", false, "sync, enrich: fetch again even if the data is current")
 	allowShrink := fs.Bool("allow-shrink", false, "sync: accept a feed with far fewer records than last time")
-	limit := fs.Int("limit", 50, "search: how many results to show")
+	limit := fs.Int("limit", 50, "search, product: how many results to show")
 	org := fs.String("org", "", "enrich: organization whose findings to look up (default $FALX_ORG, then \"default\")")
 	if err := parseFlags(fs, "fal-x intel "+sub+" [flags]", rest); err != nil {
 		return err
 	}
 
-	if err := checkIntelArgs(sub, fs.NArg()); err != nil {
+	if err := checkIntelArgs(sub, fs.NArg(), fs.Arg(0)); err != nil {
 		return err
 	}
 
@@ -54,6 +54,8 @@ func runIntel(ctx context.Context, args []string) error {
 		return intelStatus(ctx, db)
 	case "show":
 		return intelShow(ctx, db, fs.Arg(0))
+	case "product":
+		return intelProduct(ctx, db, fs.Arg(0), *limit)
 	default:
 		return intelSearch(ctx, db, strings.Join(fs.Args(), " "), *limit)
 	}
@@ -61,7 +63,7 @@ func runIntel(ctx context.Context, args []string) error {
 
 // checkIntelArgs validates the subcommand and its argument count before any
 // database work.
-func checkIntelArgs(sub string, nargs int) error {
+func checkIntelArgs(sub string, nargs int, arg0 string) error {
 	switch sub {
 	case "sync", "status", "enrich":
 	case "show":
@@ -71,6 +73,10 @@ func checkIntelArgs(sub string, nargs int) error {
 	case "search":
 		if nargs < 1 {
 			return logging.Usagef("usage: fal-x intel search <text>")
+		}
+	case "product":
+		if nargs != 1 || !strings.Contains(arg0, ":") {
+			return logging.Usagef("usage: fal-x intel product <vendor:product>  (for example apache:http_server)")
 		}
 	default:
 		return logging.Usagef("unknown intel subcommand %q; usage: %s", sub, intelUsage)
@@ -167,10 +173,43 @@ func intelSearch(ctx context.Context, db *store.DB, text string, limit int) erro
 	})
 }
 
+func intelProduct(ctx context.Context, db *store.DB, spec string, limit int) error {
+	vendor, product, _ := strings.Cut(spec, ":")
+	return db.InTx(ctx, func(tx *sql.Tx) error {
+		hits, err := intel.ByProduct(ctx, tx, vendor, product, limit)
+		if err != nil {
+			return logging.Runtimef("%v", err)
+		}
+		if len(hits) == 0 {
+			fmt.Println("no CVE is listed against that product; sync NVD first: fal-x intel sync --source nvd")
+			return nil
+		}
+		w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+		fmt.Fprintln(w, "CVE\tKEV\tCVSS\tEPSS\tAFFECTED VERSIONS")
+		for _, h := range hits {
+			kev, cvss, epss := "-", "-", "-"
+			if h.KEV {
+				kev = "yes"
+			}
+			if h.CVSS != nil {
+				cvss = fmt.Sprintf("%.1f", *h.CVSS)
+			}
+			if h.EPSS != nil {
+				epss = fmt.Sprintf("%.3f", *h.EPSS)
+			}
+			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", h.CVE, kev, cvss, epss, firstLine(h.Range, 80))
+		}
+		return w.Flush()
+	})
+}
+
 // printDetail renders one CVE. "Not in any source" and "in a source but not listed
 // as exploited" are different statements and are worded differently.
 func printDetail(d *intel.Detail) {
 	fmt.Println(d.CVE)
+	if d.Via != "" {
+		fmt.Printf("  resolved from %s\n", d.Via)
+	}
 	if !d.Known {
 		fmt.Println("  not present in any synced source (run: fal-x intel sync)")
 		return
@@ -202,11 +241,32 @@ func printDetail(d *intel.Detail) {
 	} else {
 		fmt.Println("  CVSS       not fetched (run: fal-x intel enrich " + d.CVE + ")")
 	}
+	if len(d.Products) > 0 {
+		fmt.Printf("  affects    %s\n", firstLine(strings.Join(d.Products, ", "), 160))
+	}
+	printAdvisories(d)
 	if d.EPSS != nil {
 		fmt.Printf("  EPSS       %.4f probability, %.1f%% percentile (model %s, %s)\n",
 			d.EPSS.Score, d.EPSS.Percentile*100, d.EPSS.Model, d.EPSS.ScoreDate.Format(util.DateOnly))
 	} else {
 		fmt.Println("  EPSS       no score")
+	}
+}
+
+// printAdvisories lists the OSV advisories and aliases that name a CVE.
+func printAdvisories(d *intel.Detail) {
+	if len(d.Aliases) > 0 {
+		fmt.Printf("  aliases    %s\n", strings.Join(d.Aliases, ", "))
+	}
+	for _, a := range d.Advisories {
+		state := ""
+		if a.Withdrawn {
+			state = " (withdrawn)"
+		}
+		fmt.Printf("  OSV        %s [%s]%s %s\n", a.ID, a.Ecosystem, state, firstLine(a.Summary, 100))
+		if len(a.Packages) > 0 {
+			fmt.Printf("             packages: %s\n", firstLine(strings.Join(a.Packages, ", "), 100))
+		}
 	}
 }
 

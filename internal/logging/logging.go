@@ -6,7 +6,8 @@
 //	0  success
 //	1  runtime failure, such as a stage or tool failing
 //	2  usage or validation error, such as a bad flag or malformed input
-//	3  authorization or scope refusal
+//	3  authorization refusal (reserved: ExitFor maps an ErrScope to it, but no
+//	   command emits one today)
 package logging
 
 import (

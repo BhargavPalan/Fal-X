@@ -7,12 +7,12 @@ import (
 	"database/sql"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
 
 	"github.com/BhargavPalan/Fal-X/internal/store"
+	"github.com/BhargavPalan/Fal-X/internal/storetest"
 )
 
 const kevFixture = `{
@@ -116,51 +116,20 @@ func TestCVEsIn(t *testing.T) {
 }
 
 func TestLookup(t *testing.T) {
-	if got, err := Lookup(nil); err != nil || len(got) != len(Sources) {
-		t.Errorf("Lookup(nil) = %d, %v", len(got), err)
-	}
 	if got, err := Lookup([]string{" KEV "}); err != nil || len(got) != 1 || got[0].Name != "kev" {
 		t.Errorf("Lookup(KEV) = %v, %v", got, err)
 	}
-	if _, err := Lookup([]string{"nvd"}); err == nil {
+	if _, err := Lookup([]string{"vulncheck"}); err == nil {
 		t.Error("an unbuilt source was accepted")
 	}
 }
 
-// ---- database tests ----
-
-// testDB opens the integration database, serialised with the other packages'
-// tests through the shared advisory lock, or skips. The key must match
-// store.testLockKey.
 func testDB(t *testing.T) *store.DB {
-	t.Helper()
-	dsn := strings.TrimSpace(os.Getenv("FALX_TEST_DSN"))
-	if dsn == "" {
-		t.Skip("set FALX_TEST_DSN to run database integration tests")
-	}
+	db := storetest.NewTestDB(t)
 	ctx := context.Background()
-	db, err := store.Open(ctx, store.DefaultOptions(dsn))
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-	lock, err := db.SQL().Conn(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := lock.ExecContext(ctx, "SELECT pg_advisory_lock($1)", 7263001); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		_, _ = lock.ExecContext(context.Background(), "SELECT pg_advisory_unlock($1)", 7263001)
-		_ = lock.Close()
-	})
-	if _, err := db.Migrate(ctx); err != nil {
-		t.Fatalf("Migrate: %v", err)
-	}
 	// Start from nothing so counts are exact. These tables are global, so this is
 	// only safe because the lock above excludes every other test.
-	for _, tbl := range []string{"source_watermark", "cve_nvd", "cve_epss", "cve_kev_cisa", "cve"} {
+	for _, tbl := range []string{"source_watermark", "osv_advisory", "cve_nvd", "cve_epss", "cve_kev_cisa", "cve"} {
 		if _, err := db.SQL().ExecContext(ctx, "DELETE FROM "+tbl); err != nil {
 			t.Fatal(err)
 		}

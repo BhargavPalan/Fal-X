@@ -30,9 +30,9 @@ func runMigrate(ctx context.Context, args []string) error {
 		return logging.Usagef("unknown migrate action: %s (expected up, down, or status)", action)
 	}
 
-	// Migrations need DDL rights, which is why this runs as the migration role
-	// rather than the application role. Row-level security is disabled for the
-	// duration of a migration anyway.
+	// Migrations issue DDL, so the connected role needs schema rights. They run
+	// outside any tenant transaction — they change the schema, not tenant rows — so
+	// no org_id is set and row-level security stays enabled throughout.
 	db, err := openDB(ctx, *dsn)
 	if err != nil {
 		return err
@@ -144,8 +144,6 @@ func notBuilt(cmd string) error {
 	return logging.Usagef("%s is not available yet", cmd)
 }
 
-func runMatch(_ context.Context, _ []string) error   { return notBuilt("match") }
-func runVerify(_ context.Context, _ []string) error  { return notBuilt("verify") }
 func runExploit(_ context.Context, _ []string) error { return notBuilt("exploit") }
 func runSession(_ context.Context, _ []string) error { return notBuilt("session") }
 func runServe(_ context.Context, _ []string) error   { return notBuilt("serve") }

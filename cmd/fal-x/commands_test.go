@@ -2,43 +2,15 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"errors"
 	"flag"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/BhargavPalan/Fal-X/internal/logging"
-	"github.com/BhargavPalan/Fal-X/internal/run"
 )
-
-// newReportRun writes a real run directory with one finding, using only
-// synthetic data.
-func newReportRun(t *testing.T) string {
-	t.Helper()
-	r, err := run.Init(t.TempDir(), "example.com", "20261003-123456")
-	if err != nil {
-		t.Fatal(err)
-	}
-	r.SetTarget("example.com")
-	_ = r.Stage("scan", func() error { return nil })
-	if err := r.Finalise(); err != nil {
-		t.Fatal(err)
-	}
-	scan := filepath.Join(r.Dir, "7-scan")
-	if err := os.MkdirAll(scan, 0o750); err != nil {
-		t.Fatal(err)
-	}
-	line := "[tmpl-a] [http] [high] http://example.com/a\n"
-	if err := os.WriteFile(filepath.Join(scan, "findings.json"), []byte(line), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	return r.Dir
-}
 
 // captureStdout runs fn and returns what it wrote to standard output.
 func captureStdout(t *testing.T, fn func()) string {
@@ -62,77 +34,6 @@ func captureStdout(t *testing.T, fn func()) string {
 		}
 	}
 	return sb.String()
-}
-
-func TestReportCommand(t *testing.T) {
-	dir := newReportRun(t)
-
-	t.Run("json to a file", func(t *testing.T) {
-		out := filepath.Join(t.TempDir(), "r.json")
-		if err := runSubcommand(t, "report", []string{"--run", dir, "--format", "json", "--out", out}); err != nil {
-			t.Fatal(err)
-		}
-		b, err := os.ReadFile(out)
-		if err != nil {
-			t.Fatal(err)
-		}
-		var doc struct {
-			Findings struct {
-				Items []struct{ Template string } `json:"items"`
-			} `json:"findings"`
-		}
-		if err := json.Unmarshal(b, &doc); err != nil || len(doc.Findings.Items) != 1 {
-			t.Fatalf("report JSON unusable: %v %s", err, b)
-		}
-	})
-
-	t.Run("several formats into a directory", func(t *testing.T) {
-		out := filepath.Join(t.TempDir(), "nested", "reports")
-		if err := runSubcommand(t, "report", []string{"--run", dir, "--format", "md,json,sarif", "--out", out}); err != nil {
-			t.Fatal(err)
-		}
-		for _, name := range []string{"report.md", "report.json", "report.sarif"} {
-			if _, err := os.Stat(filepath.Join(out, name)); err != nil {
-				t.Errorf("%s not written: %v", name, err)
-			}
-		}
-	})
-
-	t.Run("markdown to stdout", func(t *testing.T) {
-		var err error
-		got := captureStdout(t, func() {
-			err = runSubcommand(t, "report", []string{"--run", dir})
-		})
-		if err != nil || !strings.Contains(got, "# Fal-X report: example.com") {
-			t.Fatalf("stdout report wrong (err %v):\n%s", err, got)
-		}
-	})
-
-	t.Run("exit statuses", func(t *testing.T) {
-		bad := runSubcommand(t, "report", []string{"--run", dir, "--format", "pdf"})
-		if got := exitCode(bad); got != logging.StatusUsage {
-			t.Errorf("unknown format exit = %d, want %d", got, logging.StatusUsage)
-		}
-		missing := runSubcommand(t, "report", []string{"--run", filepath.Join(t.TempDir(), "nope")})
-		if got := exitCode(missing); got != logging.StatusRuntime {
-			t.Errorf("missing run exit = %d, want %d", got, logging.StatusRuntime)
-		}
-		if err := runSubcommand(t, "report", []string{"--help"}); !errors.Is(err, errHelp) {
-			t.Errorf("--help returned %v, want errHelp", err)
-		}
-	})
-}
-
-func TestWordlistsCommandUsage(t *testing.T) {
-	for _, args := range [][]string{nil, {"bogus"}} {
-		err := runSubcommand(t, "wordlists", args)
-		if got := exitCode(err); got != logging.StatusUsage {
-			t.Errorf("wordlists %v exit = %d, want %d", args, got, logging.StatusUsage)
-		}
-	}
-	if err := runSubcommand(t, "wordlists", []string{"fetch", "nope"}); exitCode(err) == logging.StatusOK {
-		t.Error("fetching an unknown wordlist succeeded")
-	}
 }
 
 func TestVersionJSON(t *testing.T) {
@@ -159,7 +60,7 @@ func TestVersionJSON(t *testing.T) {
 // planning stage a feature belonged to, which is the project plan leaking into the
 // product. The words checked for below are the ones that gave it away.
 func TestStubsSayOnlyThatTheyAreNotAvailable(t *testing.T) {
-	for _, name := range []string{"match", "verify", "exploit", "session", "serve"} {
+	for _, name := range []string{"exploit", "session", "serve"} {
 		err := runSubcommand(t, name, nil)
 		if exitCode(err) != logging.StatusUsage {
 			t.Errorf("%s: exit %d, want %d", name, exitCode(err), logging.StatusUsage)
@@ -222,24 +123,6 @@ func TestOrgSlugPrecedence(t *testing.T) {
 	}
 	if got := orgSlug("fromflag"); got != "fromflag" {
 		t.Errorf("flag must beat env, got %q", got)
-	}
-}
-
-// TestPersistRunOnlyReadsFalxDSN pins that a scan never writes to a database it
-// was not pointed at. DATABASE_URL and PGDSN are set on many machines for other
-// programs; only FALX_DSN opts a scan in.
-func TestPersistRunOnlyReadsFalxDSN(t *testing.T) {
-	t.Setenv("FALX_DSN", "")
-	t.Setenv("DATABASE_URL", "postgres://nobody:nothing@127.0.0.1:1/none")
-	t.Setenv("PGDSN", "postgres://nobody:nothing@127.0.0.1:1/none")
-	// If this tried to connect it would block on the refused port and log a
-	// warning; returning at once with no work is the behaviour under test.
-	done := make(chan struct{})
-	go func() { persistRun(context.Background(), t.TempDir()); close(done) }()
-	select {
-	case <-done:
-	case <-time.After(3 * time.Second):
-		t.Fatal("persistRun acted on DATABASE_URL or PGDSN")
 	}
 }
 

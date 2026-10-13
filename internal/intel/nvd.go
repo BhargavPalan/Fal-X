@@ -38,35 +38,56 @@ type NVDRecord struct {
 	Modified     *time.Time
 	Status       string
 	CWEs         []string
+	// Matches are the CPE configurations, in the order NVD lists them.
+	Matches []CPEMatch
+}
+
+// nvdCVE is one CVE as NVD's 2.0 API and bulk feeds both state it.
+type nvdCVE struct {
+	ID           string `json:"id"`
+	Published    string `json:"published"`
+	LastModified string `json:"lastModified"`
+	VulnStatus   string `json:"vulnStatus"`
+	Descriptions []struct {
+		Lang  string `json:"lang"`
+		Value string `json:"value"`
+	} `json:"descriptions"`
+	Weaknesses []struct {
+		Description []struct {
+			Value string `json:"value"`
+		} `json:"description"`
+	} `json:"weaknesses"`
+	Metrics map[string][]struct {
+		Type     string `json:"type"`
+		CVSSData struct {
+			Version      string  `json:"version"`
+			VectorString string  `json:"vectorString"`
+			BaseScore    float64 `json:"baseScore"`
+			BaseSeverity string  `json:"baseSeverity"`
+		} `json:"cvssData"`
+	} `json:"metrics"`
+	Configurations []struct {
+		Operator string `json:"operator"`
+		Nodes    []struct {
+			Operator string `json:"operator"`
+			Negate   bool   `json:"negate"`
+			CPEMatch []struct {
+				Vulnerable            bool   `json:"vulnerable"`
+				Criteria              string `json:"criteria"`
+				MatchCriteriaID       string `json:"matchCriteriaId"`
+				VersionStartIncluding string `json:"versionStartIncluding"`
+				VersionStartExcluding string `json:"versionStartExcluding"`
+				VersionEndIncluding   string `json:"versionEndIncluding"`
+				VersionEndExcluding   string `json:"versionEndExcluding"`
+			} `json:"cpeMatch"`
+		} `json:"nodes"`
+	} `json:"configurations"`
 }
 
 type nvdResponse struct {
 	TotalResults    int `json:"totalResults"`
 	Vulnerabilities []struct {
-		CVE struct {
-			ID           string `json:"id"`
-			Published    string `json:"published"`
-			LastModified string `json:"lastModified"`
-			VulnStatus   string `json:"vulnStatus"`
-			Descriptions []struct {
-				Lang  string `json:"lang"`
-				Value string `json:"value"`
-			} `json:"descriptions"`
-			Weaknesses []struct {
-				Description []struct {
-					Value string `json:"value"`
-				} `json:"description"`
-			} `json:"weaknesses"`
-			Metrics map[string][]struct {
-				Type     string `json:"type"`
-				CVSSData struct {
-					Version      string  `json:"version"`
-					VectorString string  `json:"vectorString"`
-					BaseScore    float64 `json:"baseScore"`
-					BaseSeverity string  `json:"baseSeverity"`
-				} `json:"cvssData"`
-			} `json:"metrics"`
-		} `json:"cve"`
+		CVE nvdCVE `json:"cve"`
 	} `json:"vulnerabilities"`
 }
 
@@ -90,6 +111,11 @@ func ParseNVD(r io.Reader, id string) (*NVDRecord, error) {
 		return nil, fmt.Errorf("intel: NVD answered for %q when asked about %q", c.ID, id)
 	}
 
+	return recordFrom(c), nil
+}
+
+// recordFrom reduces an NVD CVE to what Fal-X keeps.
+func recordFrom(c nvdCVE) *NVDRecord {
 	rec := &NVDRecord{
 		CVE: strings.ToUpper(c.ID), Status: c.VulnStatus,
 		Published: parseNVDTime(c.Published), Modified: parseNVDTime(c.LastModified),
@@ -130,7 +156,27 @@ func ParseNVD(r io.Reader, id string) (*NVDRecord, error) {
 		rec.CVSSVector = pick.CVSSData.VectorString
 		break
 	}
-	return rec, nil
+
+	for ci, cfg := range c.Configurations {
+		for ni, node := range cfg.Nodes {
+			for mi, m := range node.CPEMatch {
+				part, vendor, product, version, err := ParseCPE(m.Criteria)
+				if err != nil {
+					continue
+				}
+				rec.Matches = append(rec.Matches, CPEMatch{
+					ConfigSeq: ci, NodeSeq: ni, MatchSeq: mi,
+					ConfigOperator: cfg.Operator, NodeOperator: node.Operator, Negate: node.Negate,
+					Vulnerable: m.Vulnerable, Criteria: m.Criteria,
+					Part: part, Vendor: vendor, Product: product, Version: version,
+					StartIncluding: m.VersionStartIncluding, StartExcluding: m.VersionStartExcluding,
+					EndIncluding: m.VersionEndIncluding, EndExcluding: m.VersionEndExcluding,
+					MatchID: m.MatchCriteriaID,
+				})
+			}
+		}
+	}
+	return rec
 }
 
 // parseNVDTime reads NVD's timestamps, which carry no zone and are UTC.
@@ -290,30 +336,7 @@ func fetchNVD(ctx context.Context, opts NVDOptions, id string) (*NVDRecord, erro
 }
 
 func storeNVD(ctx context.Context, db *store.DB, r *NVDRecord) error {
-	cwes := r.CWEs
-	if cwes == nil {
-		cwes = []string{}
-	}
 	return db.InTx(ctx, func(tx *sql.Tx) error {
-		if err := ensureCVEs(ctx, tx, []string{r.CVE}); err != nil {
-			return err
-		}
-		_, err := tx.ExecContext(ctx, `
-			INSERT INTO cve_nvd
-				(cve_id, cvss_version, cvss_score, cvss_severity, cvss_vector, description,
-				 published_at, modified_at, vuln_status, cwes, fetched_at)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now())
-			ON CONFLICT (cve_id) DO UPDATE SET
-				cvss_version = EXCLUDED.cvss_version, cvss_score = EXCLUDED.cvss_score,
-				cvss_severity = EXCLUDED.cvss_severity, cvss_vector = EXCLUDED.cvss_vector,
-				description = EXCLUDED.description, published_at = EXCLUDED.published_at,
-				modified_at = EXCLUDED.modified_at, vuln_status = EXCLUDED.vuln_status,
-				cwes = EXCLUDED.cwes, fetched_at = now()`,
-			r.CVE, r.CVSSVersion, r.CVSSScore, r.CVSSSeverity, r.CVSSVector, r.Description,
-			r.Published, r.Modified, r.Status, cwes)
-		if err != nil {
-			return fmt.Errorf("intel: store NVD %s: %w", r.CVE, err)
-		}
-		return nil
+		return writeNVD(ctx, tx, []*NVDRecord{r})
 	})
 }

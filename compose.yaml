@@ -3,10 +3,12 @@
 # This is for development only. A deployment uses whatever Postgres the
 # operator already runs, reached through FALX_DSN.
 #
-# The application role is deliberately not a superuser and has no BYPASSRLS. Row
-# level security does not apply to a table owner unless FORCE is set, and it
-# never applies to a role with BYPASSRLS, so a convenient role would quietly
-# disable the tenant isolation the whole design rests on.
+# Row-level security never applies to a superuser or a BYPASSRLS role, and the
+# postgres image creates POSTGRES_USER as a SUPERUSER. So initdb/01-no-superuser.sql
+# downgrades the application role to NOSUPERUSER NOBYPASSRLS the moment the database
+# is initialised; otherwise a convenient role would quietly disable the tenant
+# isolation the whole design rests on. (Migrations set FORCE row-level security, so
+# the role staying the schema owner does not reopen the hole.)
 
 services:
   postgres:
@@ -20,6 +22,8 @@ services:
       - "127.0.0.1:5432:5432"
     volumes:
       - falx-pgdata:/var/lib/postgresql/data
+      # Runs once on an empty data directory, after the role and database exist.
+      - ./initdb:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U falx -d falx"]
       interval: 5s

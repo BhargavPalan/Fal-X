@@ -4,47 +4,17 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"os"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/BhargavPalan/Fal-X/internal/graph"
 	"github.com/BhargavPalan/Fal-X/internal/store"
+	"github.com/BhargavPalan/Fal-X/internal/storetest"
 )
 
-// testDB opens the integration database under the shared advisory lock, or skips.
-// The key must match store.testLockKey.
-func testDB(t *testing.T) *store.DB {
-	t.Helper()
-	dsn := strings.TrimSpace(os.Getenv("FALX_TEST_DSN"))
-	if dsn == "" {
-		t.Skip("set FALX_TEST_DSN to run database integration tests")
-	}
-	ctx := context.Background()
-	db, err := store.Open(ctx, store.DefaultOptions(dsn))
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-	lock, err := db.SQL().Conn(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := lock.ExecContext(ctx, "SELECT pg_advisory_lock($1)", 7263001); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		_, _ = lock.ExecContext(context.Background(), "SELECT pg_advisory_unlock($1)", 7263001)
-		_ = lock.Close()
-	})
-	if _, err := db.Migrate(ctx); err != nil {
-		t.Fatalf("Migrate: %v", err)
-	}
-	return db
-}
-
 func TestRankOrdersByScoreAndUsesIntelligence(t *testing.T) {
-	db := testDB(t)
+	db := storetest.NewTestDB(t)
 	ctx := context.Background()
 
 	// Intelligence: one CVE that is known exploited, one only modelled likely.
@@ -71,11 +41,11 @@ func TestRankOrdersByScoreAndUsesIntelligence(t *testing.T) {
 	scoped, _ := db.WithOrg(ctx, orgID)
 	if err := scoped.InTx(ctx, func(tx *sql.Tx) error {
 		add := func(identifier, value string) error {
-			id, err := store.UpsertAsset(ctx, tx, orgID, "service", identifier)
+			ref, err := graph.Resolve(ctx, tx, orgID, graph.TypeService, identifier, identifier, 0)
 			if err != nil {
 				return err
 			}
-			return store.AddAttribute(ctx, tx, id, "finding", value, "scan/nuclei", 1)
+			return graph.AddFact(ctx, tx, ref, "finding", value, "scan/nuclei", false, 1, 0)
 		}
 		for _, p := range [][2]string{
 			{"a.example.test:22", `medium CVE-2023-48795 ["Vulnerable to Terrapin"]`},
@@ -134,7 +104,7 @@ func TestRankOrdersByScoreAndUsesIntelligence(t *testing.T) {
 }
 
 func TestSetCriticalityRejectsOutOfRange(t *testing.T) {
-	db := testDB(t)
+	db := storetest.NewTestDB(t)
 	ctx := context.Background()
 	err := db.InTx(ctx, func(tx *sql.Tx) error {
 		_, err := store.SetCriticality(ctx, tx, "x", 101)
@@ -142,5 +112,79 @@ func TestSetCriticalityRejectsOutOfRange(t *testing.T) {
 	})
 	if err == nil {
 		t.Error("criticality 101 accepted")
+	}
+}
+
+func TestRankAllIncludesMatchesAndRankDoesNot(t *testing.T) {
+	db := storetest.NewTestDB(t)
+	ctx := context.Background()
+	for _, q := range []string{
+		"DELETE FROM cve_epss", "DELETE FROM cve_nvd", "DELETE FROM cve_kev_cisa", "DELETE FROM cve",
+		"INSERT INTO cve (cve_id) VALUES ('CVE-2021-41773'), ('CVE-2020-0001')",
+		`INSERT INTO cve_kev_cisa (cve_id, date_added) VALUES ('CVE-2021-41773', '2026-01-01')`,
+		`INSERT INTO cve_nvd (cve_id, cvss_version, cvss_score) VALUES
+		   ('CVE-2021-41773', '3.1', 9.8), ('CVE-2020-0001', '3.1', 5.0)`,
+	} {
+		if _, err := db.SQL().ExecContext(ctx, q); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+
+	slug := fmt.Sprintf("rankall-%d", time.Now().UnixNano())
+	orgID, err := db.EnsureOrg(ctx, slug, slug)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = db.SQL().ExecContext(ctx, "DELETE FROM org WHERE slug = $1", slug) })
+
+	scoped, _ := db.WithOrg(ctx, orgID)
+	if err := scoped.InTx(ctx, func(tx *sql.Tx) error {
+		ref, err := graph.Resolve(ctx, tx, orgID, graph.TypeURL, "https://a.example.test", "https://a.example.test", 0)
+		if err != nil {
+			return err
+		}
+		return store.ReplaceMatches(ctx, tx, orgID, []store.MatchRow{
+			{AssetID: int64(ref), Evidence: "Apache/2.4.49", Software: "Apache", Version: "2.4.49", Vendor: "apache",
+				Product: "http_server", CVE: "CVE-2021-41773", Tier: "affected", Confidence: "high", Reason: "version listed"},
+			{AssetID: int64(ref), Evidence: "Apache", Software: "Apache", Vendor: "apache",
+				Product: "http_server", CVE: "CVE-2020-0001", Tier: "unverified", Confidence: "low", Reason: "guessed"},
+		})
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var scanner, all []Ranked
+	if err := scoped.InTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		if scanner, err = Rank(ctx, tx); err != nil {
+			return err
+		}
+		all, err = RankAll(ctx, tx)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(scanner) != 0 {
+		t.Errorf("Rank returned %d entries; it is scanner findings only", len(scanner))
+	}
+	if len(all) != 2 {
+		t.Fatalf("RankAll returned %d entries, want the 2 matches", len(all))
+	}
+	first := all[0]
+	if first.Source != "match" || first.Finding.CVE != "CVE-2021-41773" || first.Finding.Severity != "critical" ||
+		first.Result.Decision != Act || !strings.Contains(first.Finding.Template, "Apache 2.4.49") {
+		t.Errorf("the confirmed known-exploited match should lead as Act: %+v", first)
+	}
+	if all[1].Result.Decision == Act || all[1].Finding.Severity != "medium" {
+		t.Errorf("the guessed match = %+v, want a medium, non-Act entry", all[1])
+	}
+	for _, r := range all {
+		sum := 0
+		for _, w := range r.Result.Why {
+			sum += w.Points
+		}
+		if sum != r.Result.Score {
+			t.Errorf("%s: reasons sum to %d, score is %d", r.Finding.CVE, sum, r.Result.Score)
+		}
 	}
 }

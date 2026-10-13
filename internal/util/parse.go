@@ -2,9 +2,8 @@
 // URL parsing, timestamps, JSON escaping, and a non-executing credential
 // parser.
 //
-// It performs no network access. Network authorization lives exclusively in
-// internal/net, and the authorization decision itself in internal/scope, so
-// that there is exactly one of each.
+// It performs no network access and makes no authorization decisions; it is pure
+// parsing and IO that other packages build on.
 package util
 
 import (
@@ -261,7 +260,7 @@ func IsPortOrRange(s string) bool {
 	if s == "" {
 		return false
 	}
-	for _, part := range strings.Split(s, ",") {
+	for part := range strings.SplitSeq(s, ",") {
 		if part == "" {
 			return false
 		}

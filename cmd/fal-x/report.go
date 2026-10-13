@@ -2,90 +2,39 @@ package main
 
 import (
 	"context"
-	"os"
-	"path/filepath"
-	"strings"
 
-	"github.com/BhargavPalan/Fal-X/internal/config"
 	"github.com/BhargavPalan/Fal-X/internal/logging"
-	"github.com/BhargavPalan/Fal-X/internal/report"
 )
 
-// runReport renders a finished run as Markdown, JSON or SARIF.
-//
-// It only reads files the run already wrote, so it contacts nothing and needs no
-// scope: producing a report cannot widen what was scanned.
-func runReport(_ context.Context, args []string) error {
+// runReport renders the entity graph and the ranked findings a scan produced, as a
+// Markdown document read from the database. It contacts nothing: a report cannot
+// widen what was scanned.
+func runReport(ctx context.Context, args []string) error {
 	fs := flagSet("report")
-	runDir := fs.String("run", "", "run directory (default: the newest run under --output)")
-	target := fs.String("target", "", "newest run of this target (used when --run is not given)")
-	formats := fs.String("format", "md", "md, json or sarif; comma-separated for several")
-	out := fs.String("out", "", "write to this file (one format), or into this directory (several)")
-	root := fs.String("output", filepath.Join(config.Home(), "output"), "output root to search for runs")
-	if err := parseFlags(fs, "fal-x report [--run <dir> | --target <t>] [--format md,json,sarif] [--out <path>]", args); err != nil {
+	dsn := fs.String("dsn", "", "Postgres connection string (default $FALX_DSN)")
+	org := fs.String("org", "", "organization slug (default $FALX_ORG, then \"default\")")
+	out := fs.String("out", "", "write to this file instead of standard output")
+	if err := parseFlags(fs, "fal-x report [--out file] [--org slug]", args); err != nil {
 		return err
 	}
 
-	var fmts []report.Format
-	for _, name := range strings.Split(*formats, ",") {
-		f, err := report.ParseFormat(name)
-		if err != nil {
-			return logging.Usagef("%v", err)
-		}
-		fmts = append(fmts, f)
+	db, err := openDB(ctx, *dsn)
+	if err != nil {
+		return err
 	}
+	defer db.Close()
 
-	dir := *runDir
-	if dir == "" {
-		d, err := report.Latest(*root, *target)
-		if err != nil {
-			return logging.Runtimef("%v", err)
-		}
-		dir = d
-	}
-
-	m, err := report.Load(dir)
+	id, err := db.EnsureOrg(ctx, orgSlug(*org), orgSlug(*org))
 	if err != nil {
 		return logging.Runtimef("%v", err)
 	}
-
-	// One format with no --out goes to stdout so it can be piped. Several formats
-	// need somewhere to land, so they are written beside the run.
-	if len(fmts) == 1 && *out == "" {
-		b, err := report.Render(m, fmts[0])
-		if err != nil {
-			return logging.Runtimef("%v", err)
-		}
-		_, err = os.Stdout.Write(b)
-		return err
+	scoped, err := db.WithOrg(ctx, id)
+	if err != nil {
+		return logging.Runtimef("%v", err)
 	}
-
-	for _, f := range fmts {
-		b, err := report.Render(m, f)
-		if err != nil {
-			return logging.Runtimef("%v", err)
-		}
-		path := outputPath(*out, dir, f, len(fmts) > 1)
-		if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
-			return logging.Runtimef("could not create %s: %v", filepath.Dir(path), err)
-		}
-		if err := os.WriteFile(path, b, 0o600); err != nil {
-			return logging.Runtimef("could not write %s: %v", path, err)
-		}
-		logging.Ok("wrote %s", path)
+	b, err := renderGraphReport(ctx, scoped)
+	if err != nil {
+		return logging.Runtimef("%v", err)
 	}
-	return nil
-}
-
-// outputPath decides where one rendered format is written.
-func outputPath(out, runDir string, f report.Format, several bool) string {
-	name := "report." + f.Extension()
-	switch {
-	case out == "":
-		return filepath.Join(runDir, name)
-	case several:
-		return filepath.Join(out, name)
-	default:
-		return out
-	}
+	return writeOut(*out, b)
 }
